@@ -322,4 +322,6 @@ qq-bridge-memory/
 | [integration/INSTALL.md](integration/INSTALL.md) | 各系统安装 / 验证 / 回滚 / 故障速查 |
 | [integration/README-step4.md](integration/README-step4.md) | 补丁改了什么、8 处钩子、轮换安全阀 |
 | [docs/工程细节.md](docs/工程细节.md) | 模块职责、标定取舍、数据库约定、事件时效细则 |
+| [docs/privacy.md](docs/privacy.md) | 数据存哪、日志记什么、什么时候联网、怎么彻底删除 |
 | [docs/事件时效设计.md](docs/事件时效设计.md) | v2.3 设计稿 |
+| [CHANGELOG.md](CHANGELOG.md) | 版本变更与已知限制 |
