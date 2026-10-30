@@ -1,0 +1,58 @@
+# ============================================================
+# qq-bridge-memory .gitignore  (Step 1)
+# ============================================================
+
+# --- SQLite 数据库与运行时数据：绝不入库（含 WAL/SHM 边车文件） ---
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+data/
+logs/
+backup/
+console-token
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+.venv*/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+jieba.cache
+/pytest-of-*/
+.pytest_tmp/
+*.egg-info/
+build/
+dist/
+sdist/
+
+# --- 秘密与本地配置 ---
+.env
+.env.*
+!.env.example
+*.token
+*.pem
+*.key
+
+# --- 模型缓存：默认在项目下的 models/，不随仓库走 ---
+models/
+.cache/
+
+# --- 日志与临时产物 ---
+*.log
+*.tmp
+tmp/
+
+# --- 编辑器 / 系统 ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
