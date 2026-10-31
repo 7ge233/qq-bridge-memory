@@ -27,6 +27,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
+import profiles
 import store
 import textproc
 from audit_event_plans import run_audit
@@ -203,6 +204,7 @@ def _shell(title: str, body: str, *, nav: bool = True, status_code: int = 200) -
         '<a href="/console">总览</a>'
         '<a href="/console/memories">记忆</a>'
         '<a href="/console/maintenance">维护</a>'
+        '<a href="/console/db">数据库</a>'
         '<a href="/console/export.jsonl">导出 JSONL</a>'
         '<span class="spacer"></span>'
         '<a href="/console/logout">退出</a>'
@@ -1132,3 +1134,151 @@ def export_jsonl(request: Request) -> Response:
         media_type="application/x-ndjson",
         headers={"Content-Disposition": 'attachment; filename="qq-memory.jsonl"'},
     )
+
+
+# ---------------------------------------------------------------------------
+# 数据库档案
+# ---------------------------------------------------------------------------
+
+def _fmt_size(size: int) -> str:
+    if size <= 0:
+        return "-"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.0f} KB"
+    return f"{size / 1024 / 1024:.2f} MB"
+
+
+def _db_page(request: Request, message: str = "", error: str = "") -> HTMLResponse:
+    settings: Settings = request.app.state.settings
+    profiles.ensure_default()
+    rows = profiles.describe(settings.db_path)
+    csrf = csrf_for(request.app.state.console_token, _session_exp(request))
+    env_db = os.environ.get("QQ_MEMORY_DB", "").strip()
+
+    banners = []
+    if message:
+        banners.append(f'<p class="ok">{html.escape(message)}</p>')
+    if error:
+        banners.append(f'<p class="bad">{html.escape(error)}</p>')
+    if env_db:
+        banners.append(
+            '<p class="warn">环境变量 QQ_MEMORY_DB 已设置（' + html.escape(env_db) +
+            '），它的优先级高于这里的选择，切换不会生效。要在这里切换，先从启动脚本里去掉这一行。</p>'
+        )
+
+    body_rows = []
+    for row in rows:
+        mark = "●" if row["in_use"] else ("○" if row["is_current"] else "")
+        state = []
+        if row["in_use"]:
+            state.append('<span class="ok">运行中</span>')
+        if row["is_current"]:
+            state.append('<span class="tag">已选中（重启生效）</span>')
+        if not row["exists"]:
+            state.append('<span class="muted">尚未创建</span>')
+        counts = (
+            f'{row["memories"]} 条 / 流水 {row["turns"]} 条'
+            if row["memories"] is not None
+            else '<span class="muted">读不到（未建表或路径不可访问）</span>'
+        )
+        action = ''
+        if row["is_current"]:
+            action = '<span class="muted">当前选项</span>'
+        else:
+            action = (
+                '<form class="inline" method="post" action="/console/db/select">'
+                f'<input type="hidden" name="csrf" value="{csrf}">'
+                f'<input type="hidden" name="name" value="{html.escape(row["name"])}">'
+                '<button type="submit">切换</button></form>'
+            )
+        body_rows.append(
+            "<tr>"
+            f'<td>{html.escape(mark)} {html.escape(row["name"])}</td>'
+            f'<td><code>{html.escape(row["path"])}</code></td>'
+            f"<td>{counts}</td>"
+            f'<td>{_fmt_size(row["size_bytes"])}</td>'
+            f'<td>{" ".join(state) or "-"}</td>'
+            f"<td>{action}</td>"
+            "</tr>"
+        )
+    table = (
+        "<table><tr><th></th><th>名称</th><th>库文件</th><th>记忆 / 流水</th><th>大小</th>"
+        "<th>状态</th><th>操作</th></tr>" + "".join(body_rows) + "</table>"
+        if body_rows
+        else '<p class="muted">还没有登记任何库。</p>'
+    )
+
+    body = (
+        '<div class="card"><h2>切换数据库</h2>'
+        + "".join(banners)
+        + '<p class="muted">选择结果写进 <code>data/db-profiles.json</code>，<b>下一次启动生效</b>。'
+          "运行中的进程仍在使用上面标着「运行中」的那个库。切换后关掉侧车窗口、"
+          '重新运行 <code>run.cmd</code> 即可。</p>'
+        + table
+        + "</div>"
+        + '<div class="card"><h2>登记一个库</h2>'
+        + '<p class="muted">填名称和路径；路径不存在时，下次启动会自动建库并建表。'
+          "填目录会补上 qq-memory.db。同名会覆盖路径。</p>"
+        + '<form class="inline" method="post" action="/console/db/register">'
+        + f'<input type="hidden" name="csrf" value="{csrf}">'
+        + '<input name="name" placeholder="名称，例如 工作" size="12">'
+        + '<input name="path" placeholder="路径，例如 D:\\qq-memory\\work.db" size="42">'
+        + '<button type="submit">登记</button></form></div>'
+    )
+    return _shell("数据库", body)
+
+
+@router.get("/console/db")
+def db_page(request: Request) -> HTMLResponse:
+    return _db_page(request)
+
+
+@router.post("/console/db/select")
+def db_select(
+    request: Request,
+    name: str = Form(""),
+    csrf: str = Form(""),
+) -> HTMLResponse:
+    _ensure_csrf(request, csrf)
+    settings: Settings = request.app.state.settings
+    try:
+        entry = profiles.select(name)
+    except ValueError as exc:
+        return _db_page(request, error=str(exc))
+    audit(
+        settings,
+        "db_select",
+        name=entry["name"],
+        path=entry["path"],
+        running=str(settings.db_path),
+        peer=_peer(request),
+        token_fp=_token_fp(request.app.state.console_token),
+    )
+    return _db_page(
+        request,
+        message=f"已选中「{entry['name']}」，下次启动生效。",
+    )
+
+
+@router.post("/console/db/register")
+def db_register(
+    request: Request,
+    name: str = Form(""),
+    path: str = Form(""),
+    csrf: str = Form(""),
+) -> HTMLResponse:
+    _ensure_csrf(request, csrf)
+    settings: Settings = request.app.state.settings
+    try:
+        entry = profiles.register(name, path)
+    except ValueError as exc:
+        return _db_page(request, error=str(exc))
+    audit(
+        settings,
+        "db_register",
+        name=entry["name"],
+        path=entry["path"],
+        peer=_peer(request),
+        token_fp=_token_fp(request.app.state.console_token),
+    )
+    return _db_page(request, message=f"已登记「{entry['name']}」→ {entry['path']}。")

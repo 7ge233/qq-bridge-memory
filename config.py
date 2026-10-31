@@ -2,7 +2,7 @@
 """运行配置：路径、模型、算法常量与开关。
 
 全部通过环境变量覆盖，默认值与设计稿一致：
-  QQ_MEMORY_DB        数据库路径（默认 data/qq-memory.db）
+  QQ_MEMORY_DB        数据库路径（默认 data/qq-memory.db；设了就忽略控制台里选的档案）
   QQ_MEMORY_MODEL_DIR 模型缓存目录（默认 <项目>/models，首次运行下载约 200MB；可改到别的盘）
   QQ_MEMORY_SIM_GATE  向量余弦硬门槛（默认 0.55，按 8.3 标定后修改）
   QQ_MEMORY_WRITE_SYNC=1 时 /v1/write 同步落库（默认 0=入队异步，测试用 1）
@@ -15,10 +15,12 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+import profiles
+
 APP_VERSION = "2.3"
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "qq-memory.db"
+DEFAULT_DB_PATH = profiles.DEFAULT_DB_PATH
 DEFAULT_MODEL_DIR = PROJECT_ROOT / "models"
 DEFAULT_LOG_DIR = PROJECT_ROOT / "logs"
 DEFAULT_BACKUP_DIR = PROJECT_ROOT / "backup"
@@ -131,7 +133,7 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
-            db_path=Path(_env("QQ_MEMORY_DB") or DEFAULT_DB_PATH),
+            db_path=profiles.resolve_db_path(_env("QQ_MEMORY_DB") or None),
             model_dir=Path(_env("QQ_MEMORY_MODEL_DIR") or DEFAULT_MODEL_DIR),
             log_dir=Path(_env("QQ_MEMORY_LOG_DIR") or DEFAULT_LOG_DIR),
             backup_dir=Path(_env("QQ_MEMORY_BACKUP_DIR") or DEFAULT_BACKUP_DIR),

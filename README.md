@@ -273,6 +273,8 @@ curl.exe -s -X POST http://127.0.0.1:8787/v1/recall `
 - **日志**：`logs/qq-memory-YYYY-MM-DD.log`（JSONL，保留 7 天），记端点/耗时/条数/错误码，
   **不记原文**（只记长度与哈希前 8 位）。
 - **指标**：`/v1/stats` 与控制台；召回延迟在十几毫秒量级（模型已缓存，首条冷启动除外）。
+- **多库**：控制台「数据库」页登记多个库文件并选当前使用哪个，选择写进 `data/db-profiles.json`，
+  重启生效；`QQ_MEMORY_DB` 一旦设置则优先于这里的选择。
 
 ## 测试
 
@@ -291,7 +293,7 @@ curl.exe -s -X POST http://127.0.0.1:8787/v1/recall `
 qq-bridge-memory/
 ├─ app.py / schemas.py      # FastAPI 端点（/healthz、/v1/*）+ 请求模型
 ├─ console.py               # 控制台（鉴权、CSRF、审计、维护页）
-├─ store.py writer.py retrieval.py handoff.py embedder.py temporal.py
+├─ store.py writer.py retrieval.py handoff.py embedder.py temporal.py profiles.py
 ├─ textproc.py timeutil.py config.py logging_setup.py metrics.py backup.py
 ├─ db_init.py               # 幂等建表：WAL + 索引 + FTS5 + schema_version
 ├─ run.cmd run_backup.cmd   # 启动 / 备份
