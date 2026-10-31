@@ -17,7 +17,7 @@ from pathlib import Path
 
 import profiles
 
-APP_VERSION = "2.3"
+APP_VERSION = "2.4.0"
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_DB_PATH = profiles.DEFAULT_DB_PATH
