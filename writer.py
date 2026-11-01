@@ -51,6 +51,17 @@ _EVENT_RESCHEDULE_WORDS = (
 _EVENT_FINAL_RE = re.compile(r"(那就|就|选好了|不改了|确定|决定)")
 
 
+PLACEHOLDER_NAMES = {"私聊", "群聊", "私", "群", "private", "group", "unknown", "未知"}
+
+
+def _clean_speaker_name(value: object) -> str | None:
+    """桥接在私聊里常把 speaker.name 填成「私聊」这类占位词，别把它当人名存下来。"""
+    text = _as_str(value)
+    if not text or text.strip().lower() in PLACEHOLDER_NAMES:
+        return None
+    return text.strip()
+
+
 def _as_str(value: object) -> str:
     return "" if value is None else str(value).strip()
 
@@ -126,7 +137,7 @@ def normalize_payload(payload: Mapping | None) -> dict:
         "content": content,
         "message_id": message_id,
         "speaker_id": _as_str(speaker.get("id")) or user_id or None,
-        "speaker_name": _as_str(speaker.get("name")) or None,
+        "speaker_name": _clean_speaker_name(speaker.get("name")),
         "happened_at": happened_at,
         "source": source,
         "trigger": trigger,

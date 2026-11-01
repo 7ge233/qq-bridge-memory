@@ -121,6 +121,24 @@ def select(name: str) -> dict:
     raise ValueError(f"没有这个档案：{clean}")
 
 
+def remove(name: str) -> dict:
+    """从档案里移除一条（不动文件）。"""
+    clean = validate_name(name)
+    raw = _read_raw()
+    entries = [e for e in raw.get("entries") or [] if isinstance(e, dict)]
+    target = next((e for e in entries if e.get("name") == clean), None)
+    if target is None:
+        raise ValueError(f"没有这个档案：{clean}")
+    raw["entries"] = [e for e in entries if e.get("name") != clean]
+    if raw.get("current") == clean:
+        raw["current"] = raw["entries"][0]["name"] if raw["entries"] else None
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = PROFILES_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(PROFILES_PATH)
+    return target
+
+
 def current_db_path() -> Path | None:
     state = load()
     name = state.get("current")
@@ -165,6 +183,7 @@ def describe(in_use: Path) -> list[dict]:
     """控制台用：列出所有档案及其状态。"""
     state = load()
     rows = []
+    tiers = {e.get("name"): e.get("jieba_dict", "full") for e in _read_raw().get("entries") or []}
     for item in state["entries"]:
         path = Path(item["path"])
         memories, turns = _counts(path)
@@ -178,6 +197,7 @@ def describe(in_use: Path) -> list[dict]:
                 "turns": turns,
                 "is_current": item["name"] == state.get("current"),
                 "in_use": path.resolve() == Path(in_use).resolve(),
+                "tier": str(tiers.get(item["name"]) or "full"),
             }
         )
     return rows
@@ -187,4 +207,62 @@ def ensure_default() -> None:
     """档案为空时，把默认库登记成「默认」，让控制台有东西可看。"""
     if load()["entries"]:
         return
-    save({"current": "默认", "entries": [{"name": "默认", "path": str(DEFAULT_DB_PATH)}]})
+    save({"current": "默认", "entries": [{"name": "默认", "path": str(DEFAULT_DB_PATH), "jieba_dict": "full"}]})
+
+
+def _read_raw() -> dict:
+    try:
+        raw = json.loads(PROFILES_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"current": None, "entries": []}
+    return raw if isinstance(raw, dict) else {"current": None, "entries": []}
+
+
+def _find_raw_entry(raw: dict, name: str | None) -> dict | None:
+    target = (name or raw.get("current") or "").strip()
+    for item in raw.get("entries") or []:
+        if isinstance(item, dict) and item.get("name") == target:
+            return item
+    return None
+
+
+def entry_tier(name: str | None = None) -> str:
+    """某个档案用的词典档位；没写过就是 full。"""
+    item = _find_raw_entry(_read_raw(), name)
+    return str((item or {}).get("jieba_dict") or "full")
+
+
+def set_tier_for_path(db_path, tier: str) -> dict | None:
+    """只给路径匹配的那个档案写档位；没登记过就不动（别误改别的库）。"""
+    raw = _read_raw()
+    target = str(Path(db_path).resolve()).lower()
+    for item in raw.get("entries") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            if str(Path(item.get("path", "")).resolve()).lower() != target:
+                continue
+        except (OSError, ValueError):
+            continue
+        item["jieba_dict"] = str(tier or "full").strip() or "full"
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = PROFILES_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(PROFILES_PATH)
+        return item
+    return None
+
+
+def set_tier(tier: str, name: str | None = None) -> dict:
+    """只改 jieba_dict 一个字段，其他字段原样保留。"""
+    raw = _read_raw()
+    item = _find_raw_entry(raw, name)
+    if item is None:
+        raise ValueError("找不到要设置档位的档案")
+    item["jieba_dict"] = str(tier or "full").strip() or "full"
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = PROFILES_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(PROFILES_PATH)
+    return item
+

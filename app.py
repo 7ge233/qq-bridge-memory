@@ -12,11 +12,15 @@ from __future__ import annotations
 
 import hmac
 import hashlib
+import config
+import dataclasses
 import logging
 import os
+from pathlib import Path
 import sqlite3
 import threading
 import time
+import traceback
 from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, Body, Depends, FastAPI, HTTPException, Request
@@ -25,6 +29,7 @@ from pydantic import ValidationError
 
 import console
 import db_init
+import migrate
 import logging_setup
 import store
 from config import APP_VERSION, Settings, get_settings
@@ -83,16 +88,114 @@ def _empty_recall(reason: str, gate: float = 0.0) -> dict:
 # 生命周期
 # ---------------------------------------------------------------------------
 
+def _log_startup_failure() -> None:
+    """启动失败时把完整堆栈写进 logs/startup-error.log，窗口一闪而过也能查。"""
+    try:
+        log_dir = Path(__file__).resolve().parent / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with (log_dir / "startup-error.log").open("a", encoding="utf-8") as fh:
+            fh.write(f"\n==== {time.strftime('%Y-%m-%d %H:%M:%S')} 启动失败 ====\n")
+            fh.write(traceback.format_exc())
+    except Exception:  # noqa: BLE001 - 记日志失败不能再抛
+        pass
+
+
+def _slang_scheduler(settings, stop_event) -> None:
+    """每日定时扫描：到点且当天没跑过就扫一次。"""
+    import slangscan
+    import tuning
+
+    while not stop_event.wait(300):
+        try:
+            cfg = tuning.slang()
+            if not cfg.get("enabled") or cfg.get("scan_mode") != "daily":
+                continue
+            conn = store.open_conn(settings)
+            try:
+                if not slangscan.due_now(conn, cfg):
+                    continue
+                logger.info("到点，开始黑话自动扫描")
+                report = slangscan.scan(conn, cfg=cfg)
+                logger.info("黑话扫描完成：候选 %s，收词 %s",
+                            report.get("candidates"), len(report.get("accepted") or []))
+            finally:
+                conn.close()
+        except Exception as exc:  # noqa: BLE001 - 定时任务不能把进程搞挂
+            logger.warning("黑话定时扫描失败：%s", exc)
+
+
+def _check_slang_fingerprint(conn) -> None:
+    """黑话词表变了就把 tokens 标记为过期，提示去控制台重算。"""
+    import slang
+
+    current = slang.fingerprint()
+    stored = migrate.meta_get(conn, "tokens.slang_fp")
+    if not stored:
+        migrate.meta_set(conn, "tokens.slang_fp", current)
+        conn.commit()
+        return
+    if stored != current:
+        migrate.meta_set(conn, "tokens.stale", "1")
+        migrate.meta_set(conn, "tokens.slang_fp", current)
+        conn.commit()
+        logger.warning(
+            "黑话词表已变化（%s → %s）：已有记忆的分词可能过期，建议在控制台点「重算分词」",
+            stored, current,
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    settings = get_settings()
-    settings.ensure_dirs()
-    logging_setup.setup_logging(settings)
-    db_init.init_db(settings.db_path)
+    try:
+        settings = get_settings()
+        settings.ensure_dirs()
+        logging_setup.setup_logging(settings)
+    except Exception:
+        _log_startup_failure()
+        raise
+    boot_error = ""
+    try:
+        db_init.init_db(settings.db_path)
+    except Exception as exc:  # noqa: BLE001 - 选中库坏了也要能进控制台改回来
+        fallback = Path(config.DEFAULT_DB_PATH)
+        boot_error = f"选中的库打不开（{settings.db_path}）：{exc}"
+        logger.error("%s；尝试回退到默认库 %s", boot_error, fallback)
+        if fallback != Path(settings.db_path):
+            try:
+                db_init.init_db(fallback)
+                settings = dataclasses.replace(settings, db_path=fallback)
+                boot_error += f"；已临时回退到 {fallback}，请在控制台改回或修好原库"
+            except Exception as exc2:  # noqa: BLE001
+                logger.error("默认库也打不开：%s", exc2)
+                raise exc from exc2
+        else:
+            raise
+
+    # 词典档位：把档案里的档位翻译成 QQ_MEMORY_JIEBA_DICT，必须在 jieba 初始化之前。
+    # 若上一次迁移已完成但还没重启，这里顺手把 tokens_next 换成 tokens。
+    try:
+        active_tier = migrate.apply_tier_env()
+        boot_conn = store.open_conn(settings)
+        try:
+            swap_info = migrate.on_startup(boot_conn, active_tier=active_tier)
+            _check_slang_fingerprint(boot_conn)
+            fixed = store.resync_state(boot_conn)
+            if fixed:
+                boot_conn.commit()
+                logger.info("状态字段对齐：%d 条（is_active/deleted_at → state）", fixed)
+        finally:
+            boot_conn.close()
+        if swap_info.get("swapped"):
+            logger.info("词典档位切换完成：%s → %s（%.2fs）", swap_info.get("from_tier"),
+                        swap_info.get("to_tier"), swap_info.get("seconds") or 0)
+        elif swap_info.get("needs_restart"):
+            logger.warning("词典档位迁移已完成但未切换：%s", swap_info.get("reason") or "等待重启")
+    except Exception as exc:  # noqa: BLE001 - 迁移问题绝不能挡住启动
+        logger.warning("词典档位初始化失败，按默认词典启动：%s", exc)
 
     embedder = Embedder(settings)
     retriever = Retriever(settings, embedder)
@@ -103,6 +206,7 @@ async def lifespan(app: FastAPI):
     threading.Thread(target=embedder.warmup, name="embedder-warmup", daemon=True).start()
 
     app.state.settings = settings
+    app.state.boot_error = boot_error
     app.state.embedder = embedder
     app.state.retriever = retriever
     app.state.writer = writer
@@ -118,9 +222,14 @@ async def lifespan(app: FastAPI):
         "qq-bridge-memory %s 启动：db=%s model=%s", APP_VERSION, settings.db_path,
         settings.model_name,
     )
+    stop_event = threading.Event()
+    threading.Thread(target=_slang_scheduler, args=(settings, stop_event),
+                     name="slang-scheduler", daemon=True).start()
+
     try:
         yield
     finally:
+        stop_event.set()
         writer.stop()
         logger.info("qq-bridge-memory 已停止")
 

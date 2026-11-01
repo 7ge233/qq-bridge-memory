@@ -111,7 +111,65 @@ def mark_superseded(
             "UPDATE memories SET is_active=0, superseded_by=? WHERE id=?",
             (new_id, old_id),
         )
+        set_state(conn, old_id, STATE_INACTIVE)
     return old_ids
+
+
+STATE_ACTIVE = "active"
+STATE_INACTIVE = "inactive"
+STATE_DELETED = "deleted"
+STATES = (STATE_ACTIVE, STATE_INACTIVE, STATE_DELETED)
+
+
+def set_state(
+    conn: sqlite3.Connection,
+    ids: Iterable[int] | int,
+    state: str,
+    *,
+    now: str | None = None,
+) -> int:
+    """改状态只走这里。
+
+    state 是唯一真相；is_active / deleted_at 由它派生并同步写回，旧查询（召回、FTS、导出）
+    仍然只认 is_active 与 deleted_at，不会因为改了新字段而漏数据。
+    """
+    if state not in STATES:
+        raise ValueError(f"未知状态：{state}")
+    id_list = [int(ids)] if isinstance(ids, int) else sorted({int(i) for i in ids})
+    id_list = [i for i in id_list if i > 0]
+    if not id_list:
+        return 0
+    placeholders = ",".join("?" for _ in id_list)
+    stamp = now or iso_now()
+    sql = f"""
+        UPDATE memories SET
+          state = ?,
+          is_active = CASE WHEN ?='active' THEN 1 ELSE 0 END,
+          deleted_at = CASE
+              WHEN ?='deleted' THEN COALESCE(deleted_at, ?)
+              ELSE NULL END,
+          superseded_by = CASE WHEN ?='active' THEN NULL ELSE superseded_by END
+        WHERE id IN ({placeholders})
+    """
+    cur = conn.execute(sql, (state, state, state, stamp, state, *id_list))
+    return int(cur.rowcount or 0)
+
+
+def resync_state(conn: sqlite3.Connection) -> int:
+    """把 is_active/deleted_at 与 state 不一致的行拉回一致（升级后、外部工具改过库时用）。"""
+    cur = conn.execute(
+        """
+        UPDATE memories SET state = CASE
+            WHEN deleted_at IS NOT NULL THEN 'deleted'
+            WHEN is_active=0 THEN 'inactive'
+            ELSE 'active' END
+        WHERE state IS NOT CASE
+            WHEN deleted_at IS NOT NULL THEN 'deleted'
+            WHEN is_active=0 THEN 'inactive'
+            ELSE 'active' END
+        """
+    )
+    return int(cur.rowcount or 0)
 
 
 def revoke_supersede(conn: sqlite3.Connection, old_id: int) -> list[int]:
@@ -127,9 +185,10 @@ def revoke_supersede(conn: sqlite3.Connection, old_id: int) -> list[int]:
         return []
     new_id = int(row["superseded_by"])
     conn.execute(
-        "UPDATE memories SET is_active=1, superseded_by=NULL WHERE id=?", (old_id,)
+        "UPDATE memories SET superseded_by=NULL WHERE id=?", (old_id,)
     )
-    conn.execute("UPDATE memories SET is_active=0 WHERE id=?", (new_id,))
+    set_state(conn, old_id, STATE_ACTIVE)
+    set_state(conn, new_id, STATE_INACTIVE)
     return [int(old_id)]
 
 

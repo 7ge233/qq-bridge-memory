@@ -444,11 +444,11 @@ class Retriever:
             clause = "(scope_type='group' AND group_id=? AND visibility='group')"
             params = [group_id]
         base = (
-            "account=? AND is_active=1 AND deleted_at IS NULL "
+            "account=? AND state=? AND deleted_at IS NULL "
             "AND (event_status IS NULL OR event_status <> 'cancelled') "
             f"AND ({clause} OR visibility='public')"
         )
-        return base, [account, *params]
+        return base, [account, store.STATE_ACTIVE, *params]
 
     def _exclude_sql(self, raw: object) -> tuple[str, list[object]]:
         if not raw:

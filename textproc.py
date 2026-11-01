@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 import threading
 from collections import Counter
@@ -111,7 +112,20 @@ def _ensure_jieba() -> None:
         if _JIEBA_READY:
             return
         jieba.setLogLevel(logging.WARNING)
+        custom = os.environ.get("QQ_MEMORY_JIEBA_DICT", "").strip()
+        if custom:
+            if os.path.exists(custom):
+                jieba.set_dictionary(custom)
+            else:
+                logger.warning("QQ_MEMORY_JIEBA_DICT 指向的词典不存在，回退全量词典：%s", custom)
         jieba.initialize()
+        try:  # L2/L3 黑话词表；失败不影响主流程
+            import slang
+
+            added = slang.apply(jieba)
+            logger.info("黑话词表已加载：%d 条", added)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("黑话词表加载失败，按基础词典分词：%s", exc)
         _JIEBA_READY = True
 
 
@@ -138,12 +152,21 @@ STOPWORDS = frozenset(
 
 def tokenize(text: str | None, *, max_tokens: int = 24) -> list[str]:
     """jieba 分词 + 去停用词/单字虚词/标点；数字保留 3 位以上。"""
+    _ensure_jieba()
+    return tokenize_with(jieba.lcut, text, max_tokens=max_tokens)
+
+
+def tokenize_with(cut, text: str | None, *, max_tokens: int = 24) -> list[str]:
+    """用给定的切词函数分词，过滤器与 tokenize() 完全一致。
+
+    迁移时用它喂一个独立的 jieba.Tokenizer（加载目标档位词典），
+    保证 tokens_next 与正式链路的清洗规则一致。
+    """
     text = clean_text(text)
     if not text:
         return []
-    _ensure_jieba()
     out: list[str] = []
-    for word in jieba.lcut(text):
+    for word in cut(text):
         word = word.strip()
         if not word or word in STOPWORDS:
             continue

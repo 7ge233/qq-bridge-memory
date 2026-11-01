@@ -38,7 +38,7 @@ from config import APP_VERSION
 # 常量
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 2           # 本文件能升到的最高 schema 版本
+SCHEMA_VERSION = 3           # 本文件能升到的最高 schema 版本
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "qq-memory.db"
@@ -267,6 +267,19 @@ MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
             "ALTER TABLE memories_archive ADD COLUMN valid_until TEXT",
             "ALTER TABLE memories_archive ADD COLUMN event_status TEXT",
             INDEX_EVENT[1],
+        ),
+    ),
+    (
+        3,
+        "v2.5 状态合并：memories/归档表新增 state(active|inactive|deleted)，由 is_active+deleted_at 回填",
+        (
+            "ALTER TABLE memories ADD COLUMN state TEXT NOT NULL DEFAULT 'active'",
+            "ALTER TABLE memories_archive ADD COLUMN state TEXT NOT NULL DEFAULT 'active'",
+            "UPDATE memories SET state = CASE"
+            " WHEN deleted_at IS NOT NULL THEN 'deleted'"
+            " WHEN is_active=0 THEN 'inactive'"
+            " ELSE 'active' END",
+            "CREATE INDEX IF NOT EXISTS ix_mem_state ON memories(state)",
         ),
     ),
 )
@@ -504,6 +517,9 @@ def init_db(db_path: str | Path) -> dict:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = open_db(db_path)
     try:
+        # 迁移里的 ALTER/UPDATE 要重写整表，temp 目录不可写时会报 unable to open
+        # database file；临时表放内存，几百 MB 的表也不过几十 MB 峰值。
+        conn.execute("PRAGMA temp_store=MEMORY")
         migrated = migrate(conn)
         ensure_fts(conn)
         # 关闭前把 WAL 合回主文件，避免留下超长 -wal（下次启动会自动 checkpoint）
@@ -511,6 +527,107 @@ def init_db(db_path: str | Path) -> dict:
         return collect_report(conn, db_path, migrated)
     finally:
         conn.close()
+
+
+SQLITE_HEADER = b"SQLite format 3\x00"
+REQUIRED_TABLES = ("memories", "conversation_turns", "schema_version")
+
+
+def inspect_db(db_path: str | Path) -> dict:
+    """检查一个文件是不是本程序的库（只看，不建表、不改动）。
+
+    登记/切换只接受通过检查的库；空文件、别的软件的文件、缺表的老库都拒绝，
+    免得登记进来之后到运行时才炸。
+    """
+    path = Path(db_path).expanduser()
+    info: dict = {
+        "path": str(path),
+        "exists": path.exists(),
+        "size": path.stat().st_size if path.exists() else 0,
+        "is_sqlite": False,
+        "tables": [],
+        "missing": [],
+        "user_version": None,
+        "ok": False,
+        "reason": "",
+        "note": "",
+    }
+    if not info["exists"]:
+        info["reason"] = "文件不存在"
+        return info
+    if info["size"] == 0:
+        info["reason"] = "空文件（0 字节），不是数据库；要新建请用「新建一个库」"
+        return info
+    try:
+        with path.open("rb") as fh:
+            header = fh.read(16)
+    except OSError as exc:
+        info["reason"] = f"读不了这个文件：{exc}"
+        return info
+    if header != SQLITE_HEADER:
+        info["reason"] = "不是 SQLite 文件（文件头不对，可能是别的软件的文件）"
+        return info
+    info["is_sqlite"] = True
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
+    except sqlite3.Error as exc:
+        info["reason"] = f"打不开：{exc}"
+        return info
+    try:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        info["tables"] = sorted(tables)
+        info["missing"] = [t for t in REQUIRED_TABLES if t not in tables]
+        try:
+            info["user_version"] = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        except sqlite3.Error:
+            info["user_version"] = None
+    except sqlite3.Error as exc:
+        info["reason"] = f"读取表结构失败：{exc}"
+        return info
+    finally:
+        conn.close()
+
+    if info["missing"]:
+        info["reason"] = "不是本程序的库，缺少表：" + "、".join(info["missing"])
+        return info
+    if info["user_version"] is not None and info["user_version"] > SCHEMA_VERSION:
+        info["reason"] = f"版本过新（库 {info['user_version']} > 本程序 {SCHEMA_VERSION}），请升级侧车"
+        return info
+    info["ok"] = True
+    if "memories_fts" not in tables:
+        info["note"] = "FTS 索引缺失，启动时会自动补建"
+    elif info["user_version"] is not None and info["user_version"] < SCHEMA_VERSION:
+        info["note"] = f"库版本 {info['user_version']}，启动时会升级到 {SCHEMA_VERSION}"
+    return info
+
+
+def check_ready(db_path: str | Path) -> tuple[bool, str]:
+    """试着把库初始化到可用状态；返回 (是否可用, 原因)。
+
+    控制台在「登记」和「切换」前都先过一遍，避免把打不开的库设为当前库——
+    那种状态会让侧车下次启动直接起不来。
+    """
+    try:
+        init_db(db_path)
+        return True, ""
+    except Exception as exc:  # noqa: BLE001 - 各种 IO/权限/格式错误都要报给用户
+        parent = Path(db_path).expanduser().parent
+        details = [f"{type(exc).__name__}: {exc}"]
+        details.append(f"目录{'存在' if parent.exists() else '不存在'}")
+        if parent.exists():
+            probe = parent / f".qqm-probe-{os.getpid()}.tmp"
+            try:
+                probe.write_text("x", encoding="utf-8")
+                probe.unlink()
+                details.append("该目录可正常写入")
+            except OSError as probe_exc:
+                details.append(f"该目录写不进去（权限或安全软件拦截）：{probe_exc}")
+        text = str(exc).lower()
+        if "not a database" in text:
+            details.append("这个文件不是 SQLite 库")
+        elif "locked" in text:
+            details.append("文件被别的程序占用")
+        return False, "；".join(details)
 
 
 def main(argv: list[str] | None = None) -> int:

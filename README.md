@@ -214,7 +214,7 @@ set "DSH_BASE_URL=http://127.0.0.1:<DSH 实际端口>"
 库里的数据都保留。
 
 Linux / 服务器见 [integration/INSTALL.md](integration/INSTALL.md)（含 systemd 示例）。
-模型缓存位置可用 `QQ_MEMORY_MODEL_DIR` 改到别的盘。
+模型缓存位置可用 `QQ_MEMORY_MODEL_DIR` 改到别的盘。 词典可用 `QQ_MEMORY_JIEBA_DICT` 换成裁剪版（省约 45 MB，见 [docs/部署-内存优化.md](docs/部署-内存优化.md)）。
 
 ## 它到底做了什么
 
@@ -275,6 +275,8 @@ curl.exe -s -X POST http://127.0.0.1:8787/v1/recall `
 - **指标**：`/v1/stats` 与控制台；召回延迟在十几毫秒量级（模型已缓存，首条冷启动除外）。
 - **多库**：控制台「数据库」页登记多个库文件并选当前使用哪个，选择写进 `data/db-profiles.json`，
   重启生效；`QQ_MEMORY_DB` 一旦设置则优先于这里的选择。
+- **内存**：Windows 约 300 MB、Ubuntu 实测 320 MB（默认配置）；裁 jieba 词典后降到 **256 MB**，查询不增长。
+  Ubuntu 上的省内存做法、词典裁剪（省约 47 MB）与测量脚本见 [docs/部署-内存优化.md](docs/部署-内存优化.md)。
 
 ## 测试
 
@@ -325,5 +327,6 @@ qq-bridge-memory/
 | [integration/README-step4.md](integration/README-step4.md) | 补丁改了什么、8 处钩子、轮换安全阀 |
 | [docs/工程细节.md](docs/工程细节.md) | 模块职责、标定取舍、数据库约定、事件时效细则 |
 | [docs/privacy.md](docs/privacy.md) | 数据存哪、日志记什么、什么时候联网、怎么彻底删除 |
+| [docs/部署-内存优化.md](docs/部署-内存优化.md) | 实测内存分布、Ubuntu 省内存调优、systemd 模板 |
 | [docs/事件时效设计.md](docs/事件时效设计.md) | v2.3 设计稿 |
 | [CHANGELOG.md](CHANGELOG.md) | 版本变更与已知限制 |

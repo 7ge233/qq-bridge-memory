@@ -75,14 +75,14 @@ def test_schema_v2_columns_and_idempotent(settings):
     conn = store.open_conn(settings)
     try:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(memories)")}
-        assert {"event_at", "valid_until", "event_status"} <= columns
-        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 2
+        assert {"event_at", "valid_until", "event_status", "state"} <= columns
+        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == db_init.SCHEMA_VERSION
     finally:
         conn.close()
     db_init.init_db(settings.db_path)
     conn = store.open_conn(settings)
     try:
-        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 2
+        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == db_init.SCHEMA_VERSION
     finally:
         conn.close()
 

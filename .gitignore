@@ -56,3 +56,10 @@ tmp/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# 分词/探测脚本产生的临时文件
+jieba.*.cache
+qq-memory-probe-*/
+dict-*k.txt
+resources/dict/
+scripts/qq-memory-dict-*.txt
