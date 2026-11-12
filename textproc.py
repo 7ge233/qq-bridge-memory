@@ -183,6 +183,28 @@ def tokenize_with(cut, text: str | None, *, max_tokens: int = 24) -> list[str]:
     return out
 
 
+NOUN_FLAGS = frozenset({"n", "nr", "ns", "nt", "nz", "ng", "vn", "an"})
+
+
+def noun_tokens(text: str | None, *, max_tokens: int = 24) -> list[str]:
+    """只取名词类词（人/地/物/机构/时间名词），给「话题」提取用。"""
+    _ensure_jieba()
+    out: list[str] = []
+    try:
+        for word, flag in pseg.cut(str(text or "")):
+            token = word.strip()
+            if not token or token in STOPWORDS or len(token) < 2:
+                continue
+            if flag not in NOUN_FLAGS and not flag.startswith("n"):
+                continue
+            out.append(token)
+            if len(out) >= max_tokens:
+                break
+    except Exception:  # 词性标注不可用时退回普通分词
+        return tokenize(text, max_tokens=max_tokens)
+    return out
+
+
 def tokens_text(tokens: list[str]) -> str:
     return " ".join(tokens)
 

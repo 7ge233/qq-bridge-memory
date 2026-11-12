@@ -49,6 +49,9 @@ class FakeEmbedder:
     def embed_passage(self, text: str) -> np.ndarray:
         return self._vec(text)
 
+    def embed_passages(self, texts: list[str]) -> list[np.ndarray]:
+        return [self._vec(text) for text in texts]
+
     def health(self) -> dict:
         return {"state": "ready", "model": "fake", "dim": DIM, "degraded": False}
 

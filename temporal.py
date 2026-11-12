@@ -20,7 +20,14 @@ from timeutil import TZ, parse_iso
 _WEEKDAY_INDEX = {
     "一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6,
 }
+_CN_DIGITS = "一二三四五六七八九十两"
+_CN_NUM_RE = rf"[{_CN_DIGITS}]{{1,3}}"
+_DAY_NUM_RE = rf"(?:\d{{1,3}}|{_CN_NUM_RE})"
+# 「3号线/5号楼/2号床」不是日期，用后视排除
+_NOT_DATE_AFTER = "(?![线楼房车床桌机柜门院位号排])"
+
 _REL_DAYS = {
+    "大前天": -3,
     "大后天": 3,
     "后天": 2,
     "明天": 1,
@@ -35,15 +42,26 @@ _REL_DAYS = {
 _DEFAULT_HOUR = {"今晚": 18, "明晚": 18, "今早": 8, "明早": 8}
 
 _RE_ISO_DATE = re.compile(r"(?<!\d)(20\d{2})[-/](\d{1,2})[-/](\d{1,2})(?!\d)")
-_RE_MONTH_DAY = re.compile(r"(?<!\d)(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]")
-_RE_PREFIX_DAY = re.compile(r"(下个月|下月|这个月|本月)\s*(\d{1,2})\s*[日号]")
+_RE_MONTH_DAY = re.compile(
+    rf"(?<!\d)({_DAY_NUM_RE})\s*月\s*({_DAY_NUM_RE})\s*[日号]{_NOT_DATE_AFTER}"
+)
+# 上个月八号 / 下月三号 / 这个月十五号
+_RE_PREFIX_DAY = re.compile(
+    rf"(上个月|上月|下个月|下月|这个月|本月)\s*({_DAY_NUM_RE})\s*[日号]{_NOT_DATE_AFTER}"
+)
+# 光说「八号/三号」：只在后面是标点、语气词、「那天/的事」时才认，
+# 避免「27号员工」「3号车厢」这种编号被当成日期。
+_RE_BARE_DAY = re.compile(
+    rf"(?<![\d{_CN_DIGITS}])({_DAY_NUM_RE})\s*[日号]"
+    r"(?=$|[，。！？、,.\s]|那天|那日|的事|见面|吧|呢|啊|呀|行|去|我们)"
+)
 _RE_WEEKEND = re.compile(r"(下周末|这周末|本周末|周末)")
 _RE_WEEKDAY = re.compile(
-    r"(?:(这周|本周|下周|上周)\s*(?:周|星期|礼拜)?|(?:周|星期|礼拜))\s*([一二三四五六日天])"
+    r"(?:(上|这|下)(?:个)?(?:周|星期|礼拜)|(?:周|星期|礼拜))\s*([一二三四五六日天])"
 )
-_RE_REL_DAY = re.compile(r"(大后天|后天|明天|明晚|今天|今晚|昨天|前天|明早|今早)")
-_RE_MONTH_EDGE = re.compile(r"(下个月|下月|这个月|本月)?\s*(月底|月末|月初)")
-_RE_NUM_MONTH_EDGE = re.compile(r"(?<!\d)(\d{1,2})\s*月\s*(底|末|初)")
+_RE_REL_DAY = re.compile(r"(大前天|大后天|后天|明天|明晚|今天|今晚|昨天|前天|明早|今早)")
+_RE_MONTH_EDGE = re.compile(r"(下个月|下月|这个月|本月|上个月|上月)?\s*(月底|月末|月初)")
+_RE_NUM_MONTH_EDGE = re.compile(rf"(?<!\d)({_DAY_NUM_RE})\s*月\s*(底|末|初)")
 _RE_TIME_POINT = re.compile(
     r"(上午|下午|晚上|中午|凌晨|早上|今晚|明晚|今早|明早)?\s*"
     r"(\d{1,2}|[一二三四五六七八九十]{1,3})\s*[点时]"
@@ -148,15 +166,34 @@ def _parse_date(text: str, base_day: date) -> tuple[date, date, str, str] | None
 
     m = _RE_MONTH_DAY.search(text)
     if m:
-        day = _month_day(base_day.year, int(m.group(1)), int(m.group(2)))
-        return (day, day, m.group(0), "day") if day else None
+        month = _cn_number(m.group(1))
+        day_num = _cn_number(m.group(2))
+        if month is not None and day_num is not None:
+            day = _month_day(base_day.year, month, day_num)
+            if day is not None:
+                return day, day, m.group(0), "day"
 
     m = _RE_PREFIX_DAY.search(text)
     if m:
-        delta = 1 if "下" in m.group(1) else 0
-        year, month = _add_months(base_day.year, base_day.month, delta)
-        day = _month_day(year, month, int(m.group(2)))
-        return (day, day, m.group(0), "day") if day else None
+        prefix = m.group(1)
+        delta = 1 if "下" in prefix else (-1 if "上" in prefix else 0)
+        day_num = _cn_number(m.group(2))
+        if day_num is not None:
+            year, month = _add_months(base_day.year, base_day.month, delta)
+            day = _month_day(year, month, day_num)
+            if day is not None:
+                return day, day, m.group(0), "day"
+
+    # 光说「八号/十五号」：先按本月，若那比今天晚太多（>3 天）则认为是上个月
+    m = _RE_BARE_DAY.search(text)
+    if m:
+        day_num = _cn_number(m.group(1))
+        if day_num is not None and 1 <= day_num <= 31:
+            for delta in (0, -1):
+                year, month = _add_months(base_day.year, base_day.month, delta)
+                day = _month_day(year, month, day_num)
+                if day is not None and (day - base_day).days <= 3:
+                    return day, day, m.group(0), "day"
 
     m = _RE_WEEKEND.search(text)
     if m:
@@ -171,9 +208,9 @@ def _parse_date(text: str, base_day: date) -> tuple[date, date, str, str] | None
         monday = base_day - timedelta(days=base_day.weekday())
         offset = _WEEKDAY_INDEX[m.group(2)]
         prefix = m.group(1) or ""
-        if prefix == "下周":
+        if prefix == "下":
             offset += 7
-        elif prefix == "上周":
+        elif prefix == "上":
             offset -= 7
         day = monday + timedelta(days=offset)
         return day, day, m.group(0), "day"
@@ -185,8 +222,8 @@ def _parse_date(text: str, base_day: date) -> tuple[date, date, str, str] | None
 
     m = _RE_NUM_MONTH_EDGE.search(text)
     if m:
-        month = int(m.group(1))
-        if not 1 <= month <= 12:
+        month = _cn_number(m.group(1))
+        if month is None or not 1 <= month <= 12:
             return None
         if m.group(2) in ("底", "末"):
             day_num = calendar.monthrange(base_day.year, month)[1]
@@ -197,7 +234,8 @@ def _parse_date(text: str, base_day: date) -> tuple[date, date, str, str] | None
 
     m = _RE_MONTH_EDGE.search(text)
     if m:
-        delta = 1 if m.group(1) and "下" in m.group(1) else 0
+        prefix = m.group(1) or ""
+        delta = 1 if "下" in prefix else (-1 if "上" in prefix else 0)
         year, month = _add_months(base_day.year, base_day.month, delta)
         if "底" in m.group(2) or "末" in m.group(2):
             day_num = calendar.monthrange(year, month)[1]

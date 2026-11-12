@@ -17,7 +17,7 @@ from pathlib import Path
 
 import profiles
 
-APP_VERSION = "2.5.0"
+APP_VERSION = "2.6.1"
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_DB_PATH = profiles.DEFAULT_DB_PATH
@@ -87,6 +87,23 @@ class Settings:
     recall_limit: int = 6
     recall_max_chars: int = 800
     candidate_pool: int = 200
+    # 分层抽样：把 id 区间切成 pool_strata 段，每段取最新一条进候选池。
+    # 否则老记忆只有被 FTS 命中才可能进池（v2.5.1）。
+    pool_strata: int = 100
+    # 最终分权重（三项相加后归一到 1）
+    weight_sim: float = 0.7
+    weight_fresh: float = 0.2
+    weight_importance: float = 0.1
+    # 多样性重排（MMR）：λ 越大越偏向相关，越小越偏向互不重复
+    mmr_lambda: float = 0.70
+    # 刚被召回过的记忆降权（治复读）：60 分钟内最多降 15%
+    recall_penalty: float = 0.15
+    recall_penalty_minutes: float = 60.0
+    # 日记层：日记日按 day_cut_hour 切（跨 0 点不劈开）；命中日期的小结加分，其余压低
+    day_cut_hour: int = 5
+    diary_boost: float = 1.35
+    diary_decay: float = 0.85
+    diary_max_items: int = 2
     fts_top: int = 30
     fts_max_ids: int = 60
     df_window: int = 5000
@@ -146,6 +163,17 @@ class Settings:
             recall_limit=_env_int("QQ_MEMORY_RECALL_LIMIT", 6),
             recall_max_chars=_env_int("QQ_MEMORY_RECALL_CHARS", 800),
             candidate_pool=_env_int("QQ_MEMORY_CANDIDATE_POOL", 200),
+            pool_strata=_env_int("QQ_MEMORY_POOL_STRATA", 100),
+            weight_sim=_env_float("QQ_MEMORY_W_SIM", 0.7),
+            weight_fresh=_env_float("QQ_MEMORY_W_FRESH", 0.2),
+            weight_importance=_env_float("QQ_MEMORY_W_IMPORTANCE", 0.1),
+            mmr_lambda=_env_float("QQ_MEMORY_MMR_LAMBDA", 0.70),
+            recall_penalty=_env_float("QQ_MEMORY_RECALL_PENALTY", 0.15),
+            recall_penalty_minutes=_env_float("QQ_MEMORY_RECALL_PENALTY_MIN", 60.0),
+            day_cut_hour=_env_int("QQ_MEMORY_DAY_CUT_HOUR", 5),
+            diary_boost=_env_float("QQ_MEMORY_DIARY_BOOST", 1.35),
+            diary_decay=_env_float("QQ_MEMORY_DIARY_DECAY", 0.85),
+            diary_max_items=_env_int("QQ_MEMORY_DIARY_MAX", 2),
             fts_top=_env_int("QQ_MEMORY_FTS_TOP", 30),
             gate_min_info=_env_float("QQ_MEMORY_GATE_MIN_INFO", 0.8),
             gate_min_words=_env_int("QQ_MEMORY_GATE_MIN_WORDS", 2),

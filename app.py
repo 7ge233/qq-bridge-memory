@@ -29,6 +29,8 @@ from pydantic import ValidationError
 
 import console
 import db_init
+import diary
+from datetime import datetime, timedelta
 import migrate
 import logging_setup
 import store
@@ -437,6 +439,134 @@ def v1_handoff(
     )
     return result.as_dict()
 
+
+
+# ---------------------------------------------------------------------------
+# /v1/diary —— 日记层：骨架、写入、回读
+# ---------------------------------------------------------------------------
+
+def _diary_target(account: str, scope: str) -> dict | None:
+    scope_type, _, sid = str(scope or "").partition(":")
+    if not account or scope_type not in ("private", "group") or not sid:
+        return None
+    return {
+        "account": account,
+        "scope": {
+            "type": scope_type,
+            "user_id": sid if scope_type == "private" else "",
+            "group_id": sid if scope_type == "group" else "",
+        },
+    }
+
+
+@api.get("/diary/draft")
+def v1_diary_draft(
+    request: Request, account: str = "", scope: str = "", date: str = ""
+) -> dict:
+    """给 bridge 的事实骨架：当天聊了什么、约定、情绪、未完成。"""
+    target = _diary_target(account, scope)
+    if target is None:
+        return {"ok": False, "error": "invalid_request"}
+    settings: Settings = request.app.state.settings
+    label = diary.parse_label(date) or (
+        diary.logical_day(datetime.now(diary.TZ), settings.day_cut_hour)
+        - timedelta(days=1)
+    )
+    scope_type, user_id, group_id = store.parse_scope(target["scope"])
+    scope_key_value = store.scope_key(account, scope_type, user_id, group_id)
+    conn = store.open_conn(settings)
+    try:
+        digest = diary.build_digest(conn, scope_key_value, label, settings)
+        rows = diary.read_diary(conn, account, target["scope"], label)
+    finally:
+        conn.close()
+    return {
+        "ok": True,
+        "date": label.isoformat(),
+        "window": digest["window"],
+        "turns": digest["turns"],
+        "digest": digest,
+        "text": digest["text"],
+        "exists": bool(rows),
+        "current": rows,
+    }
+
+
+@api.post("/diary")
+def v1_diary_write(request: Request, payload: dict | None = Body(default=None)) -> dict:
+    """写入正文（同一天重复提交 = 覆盖）。正文没来时用骨架兜底。"""
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "invalid_request"}
+    settings: Settings = request.app.state.settings
+    account = _s(payload.get("account"))
+    scope = payload.get("scope") if isinstance(payload.get("scope"), dict) else {}
+    label = diary.parse_label(payload.get("date"))
+    text = str(payload.get("text") or "").strip()
+    source = str(payload.get("source") or "llm").strip().lower()
+    if source not in ("llm", "digest"):
+        source = "llm"
+    if not account or label is None:
+        return {"ok": False, "error": "invalid_request"}
+    scope_type, user_id, group_id = store.parse_scope(scope)
+    scope_key_value = store.scope_key(account, scope_type, user_id, group_id)
+    conn = store.open_conn(settings)
+    try:
+        digest = diary.build_digest(conn, scope_key_value, label, settings)
+        issues: list[str] = []
+        if not text and source == "digest":
+            text = digest["text"]
+        if not text:
+            return {"ok": False, "error": "empty_text", "digest": digest["text"]}
+        if source == "llm":
+            issues = diary.validate_prose(text, digest)
+        result = diary.write_diary(
+            conn,
+            settings,
+            request.app.state.embedder,
+            account,
+            scope,
+            label,
+            text,
+            source=source,
+            suspicious=1 if issues else 0,
+        )
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:  # 日记写失败不能影响主链路
+        logger.warning("diary 写入失败：%s", type(exc).__name__)
+        return {"ok": False, "error": "internal_error"}
+    finally:
+        conn.close()
+    result["issues"] = issues
+    result["turns"] = digest["turns"]
+    logging_setup.log_event(
+        "diary",
+        account_fp=_account_fp(account),
+        scope=scope_type,
+        chunks=result.get("chunks"),
+        source=source,
+        suspicious=bool(issues),
+    )
+    return result
+
+
+@api.get("/diary")
+def v1_diary_read(
+    request: Request, account: str = "", scope: str = "", date: str = ""
+) -> dict:
+    target = _diary_target(account, scope)
+    if target is None:
+        return {"ok": False, "error": "invalid_request"}
+    settings: Settings = request.app.state.settings
+    label = diary.parse_label(date)
+    if label is None:
+        return {"ok": False, "error": "invalid_request"}
+    conn = store.open_conn(settings)
+    try:
+        rows = diary.read_diary(conn, account, target["scope"], label)
+    finally:
+        conn.close()
+    return {"ok": True, "date": label.isoformat(), "items": rows}
 
 # ---------------------------------------------------------------------------
 # /v1/stats

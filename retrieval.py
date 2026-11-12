@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+import diary
 import store
 import textproc
 from config import Settings, get_settings
@@ -52,11 +53,14 @@ class RecallItem:
     happened_at: str | None
     speaker: str
     scope_label: str
+    category: str = ""
     created_at: str | None = None
     event_at: str | None = None
     valid_until: str | None = None
     event_status: str | None = None
     temporal_state: str = "none"
+    last_recalled_at: str | None = None
+    vector: object = None  # 归一化后的向量，只给 MMR 用，不进 JSON
 
     def as_dict(self) -> dict:
         return {
@@ -74,6 +78,7 @@ class RecallItem:
             "valid_until": self.valid_until,
             "event_status": self.event_status,
             "temporal_state": self.temporal_state,
+            "category": self.category,
         }
 
 
@@ -136,9 +141,21 @@ def freshness_score(
     return float(0.5 ** (days / half_life))
 
 
-def final_score(sim: float, freshness: float, importance: float) -> float:
-    """0.7 * 相似度 + 0.2 * 鲜活度 + 0.1 * 重要度。"""
-    return 0.7 * sim + 0.2 * freshness + 0.1 * importance
+def final_score(
+    sim: float,
+    freshness: float,
+    importance: float,
+    settings: Settings | None = None,
+) -> float:
+    """相似度 / 鲜活度 / 重要度加权（默认 0.7 / 0.2 / 0.1，三项归一到 1）。"""
+    s = settings or get_settings()
+    ws = float(s.weight_sim)
+    wf = float(s.weight_fresh)
+    wi = float(s.weight_importance)
+    total = ws + wf + wi
+    if total <= 0:
+        return 0.0
+    return (ws * sim + wf * freshness + wi * importance) / total
 
 
 def _now_dt():
@@ -153,6 +170,10 @@ def format_item_line(item: RecallItem, query_date: date | None = None) -> str:
     """单条记忆的注入行格式；有事件时间时带“事件日期 + 状态”（v2.3）。"""
     date = date_only(item.happened_at or item.created_at) or "未知时间"
     content = textproc.truncate(item.content, 300)
+    if item.category == diary.CATEGORY_DIARY:
+        if content.lstrip().startswith("【"):
+            return f"- {content}"
+        return f"- 【{date} 当天小结】{content}"
     if item.event_at:
         event_dt = parse_iso(item.event_at)
         if event_dt is not None:
@@ -186,10 +207,13 @@ def format_item_line(item: RecallItem, query_date: date | None = None) -> str:
 
 
 def render_block(
-    items: list[RecallItem], max_chars: int, query_date: date | None = None
+    items: list[RecallItem],
+    max_chars: int,
+    query_date: date | None = None,
+    note: str | None = None,
 ) -> str:
     """按 4.3 格式渲染注入块；整体长度（含标签）≤ max_chars。"""
-    if not items:
+    if not items and not note:
         return ""
     budget = max_chars - len(BLOCK_HEADER) - len(BLOCK_FOOTER)
     if budget <= 0:
@@ -197,9 +221,9 @@ def render_block(
     lines: list[str] = []
     used = 0
     if query_date is not None:
-        note = f"（对方这次问的是 {query_date.isoformat()}，注意下面事件日期对不对得上）"
-        lines.append(note)
-        used += len(note) + 1
+        day_note = f"（对方这次问的是 {query_date.isoformat()}，注意下面事件日期对不对得上）"
+        lines.append(day_note)
+        used += len(day_note) + 1
     for item in items:
         line = format_item_line(item, query_date)
         cost = len(line) + 1
@@ -207,9 +231,12 @@ def render_block(
             break
         lines.append(line)
         used += cost
-    if not lines:
+    if not lines and not note:
         return ""
-    return BLOCK_HEADER + "\n".join(lines) + BLOCK_FOOTER
+    body = "\n".join(lines)
+    if note:
+        body = f"{body}\n{note}" if body else note
+    return BLOCK_HEADER + body + BLOCK_FOOTER
 
 
 # ---------------------------------------------------------------------------
@@ -403,11 +430,38 @@ class Retriever:
                 conn, ids, where, [*base_params, *exclude_params]
             )
             items, expired_skipped = self._score_rows(
-                rows, qvec, gate_text, include_past=include_past, query_date=query_date
+                rows,
+                qvec,
+                gate_text,
+                include_past=include_past,
+                query_date=query_date,
+                diary_label=query_date,
             )
             items.sort(key=lambda item: (item.score, item.id), reverse=True)
-            selected = self._select(items, limit, max_chars)
-            block = render_block(selected, max_chars, query_date)
+            # 日记（当天小结）单独挑出来：先占位、再对剩余条目做多样性重排。
+            # 否则「昨天」这类问题会被一堆相似旧句挤掉唯一一条当天记录。
+            diaries = [it for it in items if it.category == diary.CATEGORY_DIARY]
+            others = [it for it in items if it.category != diary.CATEGORY_DIARY]
+            if query_date is not None and not diaries:
+                diaries = self._fetch_diary(
+                    conn, where, [*base_params, *exclude_params], query_date, qvec
+                )
+            diaries = diaries[: max(0, self.settings.diary_max_items)]
+            selected = diaries + self._select(
+                others, max(1, limit - len(diaries)), max_chars
+            )
+            note = None
+            if query_date is not None and not diaries:
+                hit_day = any(
+                    date_only(it.happened_at or it.event_at or it.created_at) == query_date
+                    for it in selected
+                )
+                if not hit_day:
+                    note = (
+                        f"（{query_date.isoformat()} 这天没有留下记忆；"
+                        "下面的内容都不是那天的，回答时别把日期说错）"
+                    )
+            block = render_block(selected, max_chars, query_date, note=note)
             if selected:
                 _touch_async(self.settings, [item.id for item in selected])
             if selected:
@@ -514,7 +568,41 @@ class Retriever:
                 seen.add(rid)
                 ordered.append(rid)
 
-        return ordered[: self.settings.candidate_pool]
+        # ③ 分层抽样路（v2.5.1）：只有"最新 200 条"会让更老的记忆永远进不了池，
+        # 库里九成记忆从没被召回就是这个原因。把 id 区间切成 N 段，每段取最新一条。
+        for rid in self._stratified_ids(conn, where, params):
+            if rid not in seen:
+                seen.add(rid)
+                ordered.append(rid)
+
+        cap = self.settings.fts_max_ids + self.settings.candidate_pool + self.settings.pool_strata
+        return ordered[: max(cap, self.settings.candidate_pool)]
+
+    def _stratified_ids(
+        self, conn: sqlite3.Connection, where: str, params: list[object]
+    ) -> list[int]:
+        """在全 id 区间上等距取样本，让老记忆也有机会参与打分。"""
+        strata = int(self.settings.pool_strata or 0)
+        if strata <= 0:
+            return []
+        try:
+            lo, hi = conn.execute(
+                f"SELECT MIN(id), MAX(id) FROM memories WHERE {where}", params
+            ).fetchone()
+        except sqlite3.Error:
+            return []
+        if lo is None or hi is None or int(hi) <= int(lo):
+            return []
+        bucket = max(1, (int(hi) - int(lo)) // strata)
+        try:
+            rows = conn.execute(
+                f"SELECT MAX(id) FROM memories WHERE {where} "
+                "GROUP BY (id - ?) / ? ORDER BY 1",
+                [*params, int(lo), bucket],
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+        return [int(row[0]) for row in rows if row[0] is not None]
 
     def _fetch_rows(
         self,
@@ -528,7 +616,7 @@ class Retriever:
             "SELECT id, content, fact_key, visibility, importance, happened_at,"
             " created_at, embedding, embedding_model, embedding_dim, speaker_name,"
             " role, scope_type, group_id, suspicious, category, event_at,"
-            " valid_until, event_status FROM memories "
+            " valid_until, event_status, last_recalled_at FROM memories "
             f"WHERE id IN ({placeholders}) AND {where}",
             [*ids, *params],
         ).fetchall()
@@ -542,6 +630,8 @@ class Retriever:
         *,
         include_past: bool = False,
         query_date: date | None = None,
+        diary_label: date | None = None,
+        ignore_sim_gate: bool = False,
     ) -> tuple[list[RecallItem], int]:
         time_boost = (
             self.settings.time_hint_multiplier if textproc.has_time_hint(query) else 1.0
@@ -564,7 +654,7 @@ class Retriever:
             if norm <= 0:
                 continue
             sim = float(np.dot(q, vec / norm))
-            if sim < self.settings.sim_gate:
+            if sim < self.settings.sim_gate and not ignore_sim_gate:
                 continue
 
             event_at = parse_iso(row["event_at"])
@@ -593,6 +683,12 @@ class Retriever:
             elif event_at is not None:
                 temporal_state = "planned" if now_dt < event_at else "ongoing"
 
+            category = str(row["category"] or "")
+            is_diary = category == diary.CATEGORY_DIARY
+            if is_diary:
+                # 日记本身就是历史：有效期早已过，但它是「记录」不是「计划」，不能当过期跳过
+                temporal_state = "none"
+
             if temporal_state == "past" and not include_past:
                 expired_skipped += 1
                 continue
@@ -606,7 +702,11 @@ class Retriever:
                 event_at=row["event_at"],
                 category=row["category"],
             )
-            score = final_score(sim, fresh, importance) * time_boost
+            score = final_score(sim, fresh, importance, self.settings) * time_boost
+            if is_diary:
+                same_day = diary_label is not None and date_only(row["happened_at"]) == diary_label
+                score *= self.settings.diary_boost if same_day else self.settings.diary_decay
+            score *= self._recall_penalty(row["last_recalled_at"], now_dt)
             if row["suspicious"]:
                 score *= 0.5  # 4.1.4：指令式话术降权，不直接删
             speaker = (
@@ -624,6 +724,7 @@ class Retriever:
                     score=score,
                     fact_key=row["fact_key"],
                     visibility=str(row["visibility"] or "private"),
+                    category=category,
                     happened_at=row["happened_at"],
                     speaker=speaker,
                     scope_label=label,
@@ -632,28 +733,98 @@ class Retriever:
                     valid_until=row["valid_until"],
                     event_status=status,
                     temporal_state=temporal_state,
+                    last_recalled_at=row["last_recalled_at"],
+                    vector=(vec / norm),
                 )
             )
         return items, expired_skipped
 
+    def _recall_penalty(self, last: str | None, now_dt) -> float:
+        """刚被召回过的记忆降权：60 分钟内最多降 recall_penalty（默认 15%）。"""
+        rate = float(self.settings.recall_penalty or 0.0)
+        window = float(self.settings.recall_penalty_minutes or 0.0)
+        if rate <= 0 or window <= 0 or not isinstance(last, str):
+            return 1.0
+        ts = parse_iso(last)
+        if ts is None:
+            return 1.0
+        try:
+            minutes = max(0.0, (now_dt - ts).total_seconds() / 60.0)
+        except TypeError:
+            return 1.0
+        # 刚召回 → 降满；过了一个窗口 → 不再降
+        return max(0.0, 1.0 - rate * max(0.0, 1.0 - minutes / window))
+
+    def _fetch_diary(
+        self,
+        conn: sqlite3.Connection,
+        where: str,
+        params: list[object],
+        label: date,
+        qvec: np.ndarray,
+    ) -> list[RecallItem]:
+        """按日期直接取当天小结；不依赖候选池（老日记可能进不了池）。"""
+        sql = (
+            f"SELECT * FROM memories WHERE {where} AND category=? "
+            "AND substr(happened_at,1,10)=? ORDER BY id DESC LIMIT ?"
+        )
+        rows = conn.execute(
+            sql,
+            [*params, diary.CATEGORY_DIARY, label.isoformat(), self.settings.diary_max_items],
+        ).fetchall()
+        if not rows:
+            return []
+        items, _ = self._score_rows(
+            list(rows),
+            qvec,
+            "",
+            include_past=True,
+            query_date=label,
+            diary_label=label,
+            ignore_sim_gate=True,
+        )
+        items.sort(key=lambda item: (item.score, item.id), reverse=True)
+        return items
+
     def _select(
         self, items: list[RecallItem], limit: int, max_chars: int
     ) -> list[RecallItem]:
-        """按 score 降序装入，整体 ≤ max_chars；条数可能 < limit。"""
+        """MMR 多样性重排后装入，整体 ≤ max_chars；条数可能 < limit。
+
+        第 1 条按分数最高；之后每条在「相关」和「别和已选太像」之间平衡：
+        score = λ×分数 − (1−λ)×与已选的最大余弦相似度。
+        λ=1 时退化成原来的纯分数排序。
+        """
         budget = max_chars - len(BLOCK_HEADER) - len(BLOCK_FOOTER)
-        if budget <= 0:
+        if budget <= 0 or not items:
             return []
+        lam = float(self.settings.mmr_lambda)
+        pooled = list(items[: max(limit * 6, limit)])
         selected: list[RecallItem] = []
         used = 0
-        for item in items:
-            if len(selected) >= limit:
+        while pooled and len(selected) < limit:
+            best = None
+            best_score = None
+            for item in pooled:
+                cost = len(format_item_line(item)) + 1
+                if used + cost > budget:
+                    continue
+                score = item.score
+                if lam < 1.0 and selected:
+                    sims = [
+                        float(np.dot(item.vector, chosen.vector))
+                        for chosen in selected
+                        if item.vector is not None and chosen.vector is not None
+                    ]
+                    if sims:
+                        score = lam * score - (1.0 - lam) * max(sims)
+                if best is None or score > best_score:
+                    best, best_score = item, score
+            if best is None:
                 break
-            line = format_item_line(item)
-            cost = len(line) + 1
-            if used + cost > budget:
-                break
-            selected.append(item)
-            used += cost
+            selected.append(best)
+            used += len(format_item_line(best)) + 1
+            pooled.remove(best)
         return selected
 
 
