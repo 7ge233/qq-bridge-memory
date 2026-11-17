@@ -28,6 +28,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import ValidationError
 
 import console
+import recall_log
 import db_init
 import diary
 from datetime import datetime, timedelta
@@ -311,6 +312,27 @@ def healthz(request: Request) -> dict:
 # /v1/recall
 # ---------------------------------------------------------------------------
 
+def _record_recall(settings, data: dict, result) -> None:
+    """把这次召回存进 recall_log；失败只留日志，绝不影响返回。"""
+    scope = data.get("scope") or {}
+    try:
+        recall_log.record(
+            settings,
+            account=data.get("account", ""),
+            scope_type=scope.get("type", ""),
+            scope_key=store.scope_key(
+                data.get("account", ""),
+                scope.get("type", ""),
+                scope.get("user_id", ""),
+                scope.get("group_id", ""),
+            ),
+            query=data.get("query", ""),
+            result=result,
+        )
+    except Exception:  # noqa: BLE001 - 观测失败不能污染召回
+        logging.getLogger(__name__).warning("召回日志调用失败", exc_info=True)
+
+
 @api.post("/recall")
 def v1_recall(request: Request, payload: dict | None = Body(default=None)) -> dict:
     if not isinstance(payload, dict):
@@ -349,6 +371,7 @@ def v1_recall(request: Request, payload: dict | None = Body(default=None)) -> di
         reason=result.reason,
         expired_skipped=result.expired_skipped,
     )
+    _record_recall(request.app.state.settings, data, result)
     return result.as_dict()
 
 

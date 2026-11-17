@@ -38,7 +38,7 @@ from config import APP_VERSION
 # 常量
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 3           # 本文件能升到的最高 schema 版本
+SCHEMA_VERSION = 5           # 本文件能升到的最高 schema 版本
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "qq-memory.db"
@@ -100,8 +100,14 @@ EVENT_COLUMNS: tuple[tuple[str, str], ...] = (
     ("event_status", "TEXT"),
 )
 
-# 当前完整列（35 + 3 = 38），供 store / writer / 报告使用。
-MEMORY_COLUMNS: tuple[tuple[str, str], ...] = MEMORY_COLUMNS_V1 + EVENT_COLUMNS
+# v4：画像条目的来源与置信度，JSON 字符串 {basis, confidence, evidence}。
+# 单独成组而不并进 V1：migration 1 已经发布，改它会让新老库结构分叉。
+META_COLUMNS: tuple[tuple[str, str], ...] = (("meta", "TEXT"),)
+
+# 当前完整列（35 + 3 + 1 = 39），供 store / writer / 报告使用。
+MEMORY_COLUMNS: tuple[tuple[str, str], ...] = (
+    MEMORY_COLUMNS_V1 + EVENT_COLUMNS + META_COLUMNS
+)
 
 # conversation_turns 列定义（设计稿 3.x 流水表）
 TURN_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -211,6 +217,51 @@ INDEX_EVENT = (
     "CREATE INDEX IF NOT EXISTS ix_mem_event ON memories(event_status, valid_until)",
 )
 
+# v4：画像 / 生活事件（category='profile' | 'life'）按类别 + 时间检索。
+# 现有 9 个索引没有一个能按类别过滤，画像一多就只能全表扫。
+INDEX_CATEGORY = (
+    "ix_mem_cat",
+    "CREATE INDEX IF NOT EXISTS ix_mem_cat "
+    "ON memories(account, scope_key, category, created_at)",
+)
+
+# v4：作用域级状态（每日任务水位 last_digest_day、各开关）。
+# 不塞进 memories 表：那是「记忆条目」，水位是「进程状态」，混在一起会污染检索。
+DDL_SCOPE_STATE = """
+CREATE TABLE IF NOT EXISTS scope_state (
+    account TEXT NOT NULL DEFAULT '',
+    scope_key TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (account, scope_key, key)
+)"""
+
+# v5：召回日志 —— 每次「给模型看了什么」留一条，供控制台核对。
+# 只存召回侧（问题 / 注入块 / 每条分数），不碰写侧；滚动保留，不是审计档案。
+DDL_RECALL_LOG = """
+CREATE TABLE IF NOT EXISTS recall_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account TEXT NOT NULL DEFAULT '',
+    scope_key TEXT NOT NULL DEFAULT '',
+    scope_type TEXT NOT NULL DEFAULT '',
+    query TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    item_count INTEGER NOT NULL DEFAULT 0,
+    gate REAL DEFAULT 0,
+    reason TEXT DEFAULT '',
+    degraded INTEGER DEFAULT 0,
+    latency_ms INTEGER DEFAULT 0,
+    block_chars INTEGER DEFAULT 0,
+    block TEXT,
+    items TEXT
+)"""
+
+INDEX_RECALL_TIME = (
+    "ix_recall_time",
+    "CREATE INDEX IF NOT EXISTS ix_recall_time ON recall_log(id DESC)",
+)
+
 DDL_FTS = """
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     tokens, content, tags,
@@ -280,6 +331,24 @@ MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
             " WHEN is_active=0 THEN 'inactive'"
             " ELSE 'active' END",
             "CREATE INDEX IF NOT EXISTS ix_mem_state ON memories(state)",
+        ),
+    ),
+    (
+        4,
+        "v2.7 画像：memories/归档表新增 meta(JSON) + scope_state 表 + ix_mem_cat",
+        (
+            "ALTER TABLE memories ADD COLUMN meta TEXT",
+            "ALTER TABLE memories_archive ADD COLUMN meta TEXT",
+            DDL_SCOPE_STATE,
+            INDEX_CATEGORY[1],
+        ),
+    ),
+    (
+        5,
+        "v5.0 召回可见：recall_log 表（每次召回的注入块与逐条分数）+ ix_recall_time",
+        (
+            DDL_RECALL_LOG,
+            INDEX_RECALL_TIME[1],
         ),
     ),
 )
