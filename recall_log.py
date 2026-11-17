@@ -6,7 +6,9 @@
 
 三条硬约束：
 1. 失败绝不影响回复 —— 所有异常吞掉，只留一行 warning。
-2. 不写空结果 —— 没召回到东西看 metrics 就够，不必刷屏。
+2. 空结果也写 —— 只写摘要（item_count=0 + reason），不含明细。
+   原先「空结果不写」会让「被门控挡掉」和「查了没命中」在控制台完全隐形，
+   排查「机器人怎么不记得」时分不清是没检索到还是根本没查，因此改为留痕。
 3. 滚动保留 —— 这是排查窗口，不是审计档案，默认留最近 500 条。
 """
 
@@ -37,17 +39,19 @@ def record(
     result,
     keep: int = KEEP,
 ) -> None:
-    """记一条召回。任何异常都被吞掉——日志坏了不能拖累聊天。"""
+    """记一条召回。任何异常都被吞掉——日志坏了不能拖累聊天。
+
+    空结果同样落库（items 存 "[]"）：来源、门限、reason、耗时都要留，
+    否则「没命中」和「没调用」在页面上长得一模一样。
+    """
     global _prune_tick
-    if not getattr(result, "items", None):
-        return
     try:
         from store import open_conn
 
         conn = open_conn(settings)
         try:
             rows = []
-            for item in result.items:
+            for item in (getattr(result, "items", None) or []):
                 d = item.as_dict()
                 d["content"] = (d.get("content") or "")[:ITEM_CONTENT_MAX]
                 rows.append(d)

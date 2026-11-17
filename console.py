@@ -2317,6 +2317,17 @@ def recall_page(request: Request, limit: int = 50) -> HTMLResponse:
             for it in items
         )
         block_text = str(r.get("block") or "")
+        # 空召回（被门控挡掉 / 查了没命中）同样落库，这里单独标出来，
+        # 否则它和「根本没调用召回」在页面上长得一样。
+        empty = int(r.get("item_count") or 0) == 0
+        block_html = (
+            f'<h3>模型实际看到的文本</h3>'
+            f'<pre style="white-space:pre-wrap;font-size:12px;line-height:1.55;'
+            f'background:#f6f7f9;padding:10px;border-radius:6px;max-height:420px;overflow:auto">'
+            f'{html.escape(block_text)}</pre>'
+            if block_text
+            else '<p class="muted">本次没有内容注入模型（空召回）。</p>'
+        )
         blocks.append(
             f'<details class="card"><summary>'
             f'<b>{html.escape(when)}</b> · {html.escape(str(r.get("scope_key") or ""))}'
@@ -2324,14 +2335,12 @@ def recall_page(request: Request, limit: int = 50) -> HTMLResponse:
             f' · <b>{r.get("item_count")} 条</b>'
             f' · {html.escape(str(r.get("reason") or ""))}'
             f' · {html.escape(str(r.get("latency_ms") or 0))}ms'
+            f'{" · <span class=\"muted\">未命中</span>" if empty else ""}'
             f'</summary>'
             f'<p class="muted">门限 {float(r.get("gate") or 0):.3f}'
             f' · 注入 {r.get("block_chars")} 字'
             f'{" · 降级" if r.get("degraded") else ""}</p>'
-            f'<h3>模型实际看到的文本</h3>'
-            f'<pre style="white-space:pre-wrap;font-size:12px;line-height:1.55;'
-            f'background:#f6f7f9;padding:10px;border-radius:6px;max-height:420px;overflow:auto">'
-            f'{html.escape(block_text)}</pre>'
+            f'{block_html}'
             f'<h3>逐条明细</h3>'
             f'<table><tr><th>id</th><th>类别</th><th>总分</th><th>相似</th><th>可见性</th><th>内容</th></tr>'
             f'{item_rows}</table></details>'
