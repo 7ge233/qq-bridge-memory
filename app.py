@@ -33,6 +33,7 @@ import db_init
 import diary
 from datetime import datetime, timedelta
 import migrate
+import profile_store
 import logging_setup
 import store
 from config import APP_VERSION, Settings, get_settings
@@ -590,6 +591,111 @@ def v1_diary_read(
     finally:
         conn.close()
     return {"ok": True, "date": label.isoformat(), "items": rows}
+
+# ---------------------------------------------------------------------------
+# /v1/profile —— 画像读写（5.1 / 5.2）
+# ---------------------------------------------------------------------------
+
+def _profile_budget(settings: Settings, requested: object = None) -> int:
+    """画像块预算：请求可临时覆盖，默认走配置（T3 会加 profile_max_chars）。"""
+    try:
+        budget = int(requested or 0)
+    except (TypeError, ValueError):
+        budget = 0
+    if budget > 0:
+        return budget
+    return int(getattr(settings, "profile_max_chars", profile_store.DEFAULT_RENDER_CHARS))
+
+
+@api.get("/profile")
+def v1_profile_read(
+    request: Request,
+    account: str = "",
+    scope_key: str = "",
+    max_chars: str = "",
+) -> dict:
+    """读当前画像 + 渲染块。无画像返回空数组空块，不报错（5.1）。"""
+    settings: Settings = request.app.state.settings
+    budget = _profile_budget(settings, max_chars)
+    conn = store.open_conn(settings)
+    try:
+        items = profile_store.load(conn, account, scope_key)
+        block = profile_store.render_block(conn, account, scope_key, budget)
+    except ValueError:
+        return {
+            "ok": False,
+            "error": "invalid_request",
+            "items": [],
+            "block": "",
+            "blockChars": 0,
+        }
+    except Exception as exc:  # noqa: BLE001 - 读画像失败不能让控制台/桥接报错
+        logger.warning("profile 读取失败：%s", type(exc).__name__)
+        return {"ok": False, "error": "internal_error", "items": [], "block": "", "blockChars": 0}
+    finally:
+        conn.close()
+    logging_setup.log_event(
+        "profile_read",
+        account_fp=_account_fp(account),
+        items=len(items),
+        block_chars=len(block),
+    )
+    return {
+        "ok": True,
+        "items": [
+            {
+                "fact_key": one["fact_key"],
+                "content": one["content"],
+                "updated_at": one["updated_at"],
+                "meta": one["meta"],
+            }
+            for one in items
+        ],
+        "block": block,
+        "blockChars": len(block),
+    }
+
+
+@api.post("/profile")
+def v1_profile_write(request: Request, payload: dict | None = Body(default=None)) -> dict:
+    """按 fact_key upsert 画像条目（5.2）。水位与写行同事务，由 profile_store 负责。"""
+    settings: Settings = request.app.state.settings
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "invalid_request"}
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return {"ok": False, "error": "invalid_request"}
+
+    account = _s(payload.get("account"))
+    scope_key = _s(payload.get("scope_key"))
+    conn = store.open_conn(settings)
+    try:
+        result = profile_store.upsert(
+            conn,
+            account,
+            scope_key,
+            items,
+            payload.get("source"),
+            window=payload.get("window"),
+            meta_common={"model": _s(payload.get("model")), "runId": _s(payload.get("runId"))},
+            day_cut_hour=settings.day_cut_hour,  # 显式传：配置改了必须跟着变，不靠默认值
+        )
+    except ValueError as exc:
+        # source 非 model/user、scope_key 与 account 不一致、群聊 scope 都在这里（5.2 规则 1）
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+    logging_setup.log_event(
+        "profile_write",
+        account_fp=_account_fp(account),
+        written=result["written"],
+        skipped=len(result["skipped"]),
+        downgraded=result["downgraded"],
+        advanced=result["advanced"],
+    )
+    return {"ok": True, **result}
+
 
 # ---------------------------------------------------------------------------
 # /v1/stats
