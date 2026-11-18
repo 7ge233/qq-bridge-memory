@@ -70,7 +70,7 @@ def conn(settings):
 
 def test_return_shape_matches_spec(conn):
     report = ps.upsert(
-        conn, ACCOUNT, SCOPE, [item("user.style", body(20), basis="inferred")], "model"
+        conn, ACCOUNT, SCOPE, [item("user.schedule", body(20), basis="inferred")], "model"
     )
     assert set(report) == {"written", "skipped", "downgraded", "advanced", "last_profile_day"}
     assert report["written"] == 1
@@ -84,7 +84,7 @@ def test_return_shape_matches_spec(conn):
 def test_write_then_read(conn):
     items = [
         item("user.identity", body(20), evidence="我是个后端"),
-        item("user.style", body(20), basis="inferred"),
+        item("user.schedule", body(20), basis="inferred"),
         item("user.topics", body(30)),
         item("self.speech", body(20)),
         item("self.observations", body(25)),
@@ -105,13 +105,13 @@ def test_write_then_read(conn):
 
 
 def test_source_is_mapped_to_column(conn):
-    ps.upsert(conn, ACCOUNT, SCOPE, [item("user.style", body(20))], "model")
+    ps.upsert(conn, ACCOUNT, SCOPE, [item("user.schedule", body(20))], "model")
     ps.upsert(conn, ACCOUNT, SCOPE, [item("self.speech", body(20))], "user")
     sources = {row["fact_key"]: row["source"] for row in active_rows(conn)}
-    assert sources["user.style"] == "llm"
+    assert sources["user.schedule"] == "llm"
     assert sources["self.speech"] == "console"
     with pytest.raises(ValueError):
-        ps.upsert(conn, ACCOUNT, SCOPE, [item("user.style", body(20))], "whatever")
+        ps.upsert(conn, ACCOUNT, SCOPE, [item("user.schedule", body(20))], "whatever")
 
 
 def test_old_row_superseded(conn):
@@ -132,7 +132,7 @@ def test_old_row_superseded(conn):
 
 
 def test_multiple_rows_are_filtered_by_account_and_scope(conn):
-    ps.upsert(conn, ACCOUNT, SCOPE, [item("user.style", body(20))], "model")
+    ps.upsert(conn, ACCOUNT, SCOPE, [item("user.schedule", body(20))], "model")
     assert ps.load(conn, ACCOUNT, SCOPE)
     assert ps.load(conn, "88888", "qq:88888:private:20002") == []
 
@@ -158,13 +158,13 @@ def test_unknown_and_length(conn):
             item("user.nope", body(20)),
             item("user.identity", body(10)),   # 下限 15
             item("user.identity", body(130)),  # 写入上限 120
-            item("user.style", ""),
+            item("user.schedule", ""),
         ],
         "model",
     )
     assert report["written"] == 0
     assert [one["fact_key"] for one in report["skipped"]] == [
-        "user.nope", "user.identity", "user.identity", "user.style",
+        "user.nope", "user.identity", "user.identity", "user.schedule",
     ]
     assert "白名单" in reasons(report)[0]
     assert "少于下限" in reasons(report)[1]
@@ -232,7 +232,7 @@ def test_other_fields_downgrade_when_evidence_missing(conn):
 
 
 def test_no_window_downgrades_stated(conn):
-    report = ps.upsert(conn, ACCOUNT, SCOPE, [item("user.style", body(20))], "model")
+    report = ps.upsert(conn, ACCOUNT, SCOPE, [item("user.schedule", body(20))], "model")
     assert report["written"] == 1
     assert report["downgraded"] == 1
     assert json.loads(active_rows(conn)[0]["meta"])["basis"] == "inferred"
@@ -281,7 +281,7 @@ def test_duplicate_in_one_request(conn):
         conn,
         ACCOUNT,
         SCOPE,
-        [item("user.style", body(20)), item("user.style", body(21))],
+        [item("user.schedule", body(20)), item("user.schedule", body(21))],
         "model",
     )
     assert report["written"] == 1
@@ -293,7 +293,7 @@ def test_bad_items_do_not_block_good_ones(conn):
         conn,
         ACCOUNT,
         SCOPE,
-        [item("self.name", "鲸鱼娘"), item("user.style", body(20)), "not-a-dict"],
+        [item("self.name", "鲸鱼娘"), item("user.schedule", body(20)), "not-a-dict"],
         "model",
     )
     assert report["written"] == 1
@@ -339,8 +339,8 @@ def test_render_block_truncation_keeps_priority(conn):
         SCOPE,
         [
             item("user.identity", body(20)),
-            item("user.boundaries", body(20)),
-            item("user.style", body(20)),
+            item("user.schedule", body(20)),
+            item("self.growth", body(20)),
         ],
         "model",
     )
@@ -348,13 +348,13 @@ def test_render_block_truncation_keeps_priority(conn):
     assert len(full) > 50
     tight = ps.render_block(conn, ACCOUNT, SCOPE, max_chars=50)
     assert len(tight) <= 50
-    assert "雷区" in tight          # 最高优先级保住了
+    assert "相处中的变化" in tight   # 最高优先级保住了
     assert "身份" not in tight      # 先丢的是它
     assert ps.render_block(conn, ACCOUNT, SCOPE, max_chars=0) == ""
 
 
 def test_render_block_cache_and_invalidate(conn):
-    ps.upsert(conn, ACCOUNT, SCOPE, [item("user.style", body(20))], "model")
+    ps.upsert(conn, ACCOUNT, SCOPE, [item("user.schedule", body(20))], "model")
     first = ps.render_block(conn, ACCOUNT, SCOPE)
     assert first
 
@@ -370,9 +370,9 @@ def test_render_block_cache_and_invalidate(conn):
 
 
 def test_upsert_invalidates_cache(conn):
-    ps.upsert(conn, ACCOUNT, SCOPE, [item("user.style", body(20))], "model")
+    ps.upsert(conn, ACCOUNT, SCOPE, [item("user.schedule", body(20))], "model")
     first = ps.render_block(conn, ACCOUNT, SCOPE)
-    ps.upsert(conn, ACCOUNT, SCOPE, [item("user.style", body(28))], "model")
+    ps.upsert(conn, ACCOUNT, SCOPE, [item("user.schedule", body(28))], "model")
     second = ps.render_block(conn, ACCOUNT, SCOPE)
     assert first != second
     assert body(28) in second
@@ -391,16 +391,16 @@ def test_render_block_never_raises(conn):
 
 def test_scope_must_match_account_and_be_private(conn):
     with pytest.raises(ValueError):
-        ps.upsert(conn, "77777", SCOPE, [item("user.style", body(20))], "model")
+        ps.upsert(conn, "77777", SCOPE, [item("user.schedule", body(20))], "model")
     with pytest.raises(ValueError):
-        ps.upsert(conn, ACCOUNT, f"qq:{ACCOUNT}:group:30003", [item("user.style", body(20))], "model")
+        ps.upsert(conn, ACCOUNT, f"qq:{ACCOUNT}:group:30003", [item("user.schedule", body(20))], "model")
     with pytest.raises(ValueError):
         ps.load(conn, ACCOUNT, "garbage")
 
 
 def test_profile_rows_identified_by_category_only(conn):
     """判断画像行只认 category='profile'，不看 source。"""
-    ps.upsert(conn, ACCOUNT, SCOPE, [item("user.style", body(20))], "model")
+    ps.upsert(conn, ACCOUNT, SCOPE, [item("user.schedule", body(20))], "model")
     count = conn.execute(
         "SELECT count(*) FROM memories WHERE category='profile' AND is_active=1 AND source='llm'"
     ).fetchone()[0]
@@ -424,7 +424,7 @@ def test_upsert_without_row_factory(tmp_path):
         )
         second = ps.upsert(
             conn, ACCOUNT, SCOPE,
-            [item("user.style", body(20), basis="inferred")],
+            [item("user.schedule", body(20), basis="inferred")],
             "model", window=WINDOW, day_cut_hour=5,
         )
     finally:

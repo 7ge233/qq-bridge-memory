@@ -110,7 +110,7 @@ def test_bad_source_is_400(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     with client:
         resp = _post(client, _body(source="robot", items=[
-            {"fact_key": "user.style", "content": "说话很短，经常一次只发几个字。", "basis": "inferred"},
+            {"fact_key": "user.schedule", "content": "说话很短，经常一次只发几个字。", "basis": "inferred"},
         ]))
     assert resp.status_code == 400
     assert "model/user" in resp.json()["detail"]
@@ -158,12 +158,12 @@ def test_max_chars_truncates_block(tmp_path, monkeypatch):
     with client:
         _post(client, _body(items=[
             {"fact_key": "user.identity", "content": "后端工程师，正在做QQ机器人项目", "basis": "inferred"},
-            {"fact_key": "user.boundaries", "content": "不喜欢被反复追问同一件事，会生气", "basis": "inferred"},
-            {"fact_key": "user.style", "content": "说话很短，经常只发几个字", "basis": "inferred"},
+            {"fact_key": "self.growth", "content": "从被动到主动回吻，越来越放得开", "basis": "inferred"},
+            {"fact_key": "user.schedule", "content": "常在深夜活动，凌晨才睡", "basis": "inferred"},
         ]))
         wide = _get(client).json()
         tight = _get(client, max_chars="40").json()
     assert wide["blockChars"] > 40
     assert tight["blockChars"] <= 40
-    assert "雷区" in tight["block"]        # 最高优先级保住
-    assert "说话风格" not in tight["block"]  # 先丢的是它
+    assert "相处中的变化" in tight["block"]   # 最高优先级保住
+    assert "身份" not in tight["block"]       # 先丢的是它

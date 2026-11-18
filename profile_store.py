@@ -55,7 +55,7 @@ BASIS_STATED = "stated"
 BASIS_INFERRED = "inferred"
 BASES = (BASIS_STATED, BASIS_INFERRED)
 
-DEFAULT_RENDER_CHARS = 400
+DEFAULT_RENDER_CHARS = 500
 CACHE_TTL_S = 60.0
 EVIDENCE_MAX_CHARS = 30
 
@@ -91,8 +91,6 @@ FIELD_SPECS: tuple[FieldSpec, ...] = (
     FieldSpec("user.identity", "身份", PERMISSION_EDITABLE, 15, 120, "user", 40),
     FieldSpec("user.schedule", "作息", PERMISSION_EDITABLE, 15, 120, "user", 40),
     FieldSpec("user.topics", "常聊", PERMISSION_EDITABLE, 15, 120, "user", 60),
-    FieldSpec("user.style", "说话风格", PERMISSION_EDITABLE, 15, 120, "user", 40),
-    FieldSpec("user.boundaries", "雷区", PERMISSION_EDITABLE, 15, 120, "user", 60),
     # volatile：近况天然天天变。规则 5（推断不覆盖陈述）保护的是稳定事实，
     # 对它 100% 误伤 —— 用户说「我在做 X」本身就是 stated，之后再也改不了。
     FieldSpec("user.current", "近况", PERMISSION_EDITABLE, 15, 120, "user", 60, True),
@@ -112,7 +110,8 @@ SECTION_TITLES = {"user": "【关于他】", "self": "【关于我】"}
 
 # 截断优先级（8.1）：数字越大越先被丢。四档高优先级的数字小。
 DROP_RANK: dict[str, int] = {
-    "user.boundaries": 0,     # 最高，最后被丢
+    # 「相处中的变化」是唯一记录关系进展的字段：预算紧张时它必须活到最后
+    "self.growth": 0,
     "user.identity": 1,
     "self.observations": 2,
     "user.topics": 3,
@@ -189,6 +188,9 @@ def load(conn, account: object, scope_key: object) -> list[dict]:
     ).fetchall()
     items: list[dict] = []
     for row in rows:
+        # 下线字段的旧行留在库里可回溯，但不再进 API / 不再渲染
+        if _s(row["fact_key"]) not in FIELD_SPECS_BY_KEY:
+            continue
         meta = _loads(row["meta"])
         items.append(
             {
