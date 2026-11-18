@@ -51,6 +51,12 @@ PRAGMA_STATEMENTS = (
     "PRAGMA synchronous = NORMAL",
     "PRAGMA busy_timeout = 3000",
     "PRAGMA foreign_keys = ON",
+    # 临时表 / 语句回滚日志全部放内存：memories 上挂了触发器和 FTS，
+    # 在显式事务里修改它会需要 statement journal。若系统 TEMP 目录不可写
+    # （受限账户、沙箱、被清理工具占坑），SQLite 会抛
+    # "unable to open database file" —— 表现为「只有事务内的写入失败」，
+    # 极易误判成路径或权限问题。放内存后不再依赖 TEMP。
+    "PRAGMA temp_store = MEMORY",
 )
 
 # v1 基线列（35 列）。迁移 1 必须继续用这份历史定义，不能在旧迁移里加新列；

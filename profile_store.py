@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import threading
 import time
 from dataclasses import dataclass
@@ -172,6 +173,7 @@ def _normalize_source(source: object) -> str:
 def load(conn, account: object, scope_key: object) -> list[dict]:
     """当前生效的画像条目，按 fact_key 排序。只认 category='profile' + is_active=1。"""
     acc, _ = parse_private_scope(account, scope_key)
+    _ensure_named(conn)
     rows = conn.execute(
         "SELECT id, fact_key, content, meta, source, created_at FROM memories "
         "WHERE account = ? AND scope_key = ? AND category = ? AND is_active = 1 "
@@ -204,8 +206,22 @@ def load_map(conn, account: object, scope_key: object) -> dict[str, dict]:
 # 取数辅助
 # ---------------------------------------------------------------------------
 
+def _ensure_named(conn) -> None:
+    """把行工厂设成 sqlite3.Row。
+
+    store.open_conn 并不保证设过：没有它，第一次写（表里还没有现存行）能成功，
+    写第二条时 _active_rows 里 row["fact_key"] 会抛 TypeError —— 表现为 500，
+    而且只在「已经有画像」时才发作，非常容易漏测。
+    """
+    try:
+        if conn.row_factory is not sqlite3.Row:
+            conn.row_factory = sqlite3.Row
+    except Exception:  # 连接已关闭 / 非 sqlite3 连接：交给调用方处理
+        pass
+
 def _active_rows(conn, account: str, scope_key: str) -> dict[str, dict]:
     """现存生效画像：fact_key → {id, content, basis}。"""
+    _ensure_named(conn)
     rows = conn.execute(
         "SELECT id, fact_key, content, meta FROM memories "
         "WHERE account = ? AND scope_key = ? AND category = ? AND is_active = 1",
@@ -513,6 +529,7 @@ def upsert(
 # ---------------------------------------------------------------------------
 
 def get_state(conn, account: object, scope_key: object, key: str, default: str = "") -> str:
+    _ensure_named(conn)
     row = conn.execute(
         "SELECT value FROM scope_state WHERE account = ? AND scope_key = ? AND key = ?",
         (_s(account).strip(), _s(scope_key).strip(), str(key)),

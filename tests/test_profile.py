@@ -406,3 +406,28 @@ def test_profile_rows_identified_by_category_only(conn):
     ).fetchone()[0]
     assert int(count) == 1
     assert len(ps.load(conn, ACCOUNT, SCOPE)) == 1
+
+def test_upsert_without_row_factory(tmp_path):
+    """连接没设 row_factory 时也不能炸：写第二条会查现存行。"""
+    import sqlite3
+
+    import db_init
+
+    db = tmp_path / "raw.db"
+    db_init.init_db(db)
+    conn = sqlite3.connect(db)  # 故意不设 sqlite3.Row
+    try:
+        first = ps.upsert(
+            conn, ACCOUNT, SCOPE,
+            [item("user.identity", body(20), basis="inferred")],
+            "model", window=WINDOW, day_cut_hour=5,
+        )
+        second = ps.upsert(
+            conn, ACCOUNT, SCOPE,
+            [item("user.style", body(20), basis="inferred")],
+            "model", window=WINDOW, day_cut_hour=5,
+        )
+    finally:
+        conn.close()
+    assert first["written"] == 1
+    assert second["written"] == 1

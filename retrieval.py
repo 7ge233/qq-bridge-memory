@@ -404,10 +404,14 @@ class Retriever:
 
             qvec = self.embedder.embed_query(gate_text) if self.embedder else None
             if qvec is None:
+                # embedding 不可用也必须把画像带上：画像不依赖向量。
                 return RecallResult(
                     gate=gate,
                     reason="model_unavailable",
                     degraded=True,
+                    block=self._merge_profile(
+                        conn, account, scope_type, user_id, "", max_chars
+                    ),
                     latency_ms=_ms(started),
                 )
 
@@ -424,7 +428,13 @@ class Retriever:
             )
             if not ids:
                 return RecallResult(
-                    gate=gate, reason="no_hit", latency_ms=_ms(started), candidates=0
+                    gate=gate,
+                    reason="no_hit",
+                    block=self._merge_profile(
+                        conn, account, scope_type, user_id, "", max_chars
+                    ),
+                    latency_ms=_ms(started),
+                    candidates=0,
                 )
 
             rows = self._fetch_rows(
@@ -463,23 +473,9 @@ class Retriever:
                         "下面的内容都不是那天的，回答时别把日期说错）"
                     )
             block = render_block(selected, max_chars, query_date, note=note)
-            # 画像块（8.2）：只做私聊；整体叠加在召回块之外，不占召回额度。
-            if scope_type == "private":
-                scope_key_value = store.scope_key(account, "private", user_id)
-                budget = int(self.settings.profile_max_chars)
-                profile_block = profile_store.render_block(
-                    conn, account, scope_key_value, budget
-                )
-                # 8.3：两块合计 ≤ 召回额度 + 画像额度（分隔符也计入），超了按更小预算重排画像
-                room = max_chars + budget - len(block) - 2
-                if profile_block and len(profile_block) > room:
-                    profile_block = profile_store.render_block(
-                        conn, account, scope_key_value, max(0, room)
-                    )
-                if block or profile_block:
-                    block = (
-                        f"{profile_block}\n\n{block}".strip() if profile_block else block
-                    )
+            block = self._merge_profile(
+                conn, account, scope_type, user_id, block, max_chars
+            )
             if selected:
                 _touch_async(self.settings, [item.id for item in selected])
             if selected:
@@ -506,6 +502,37 @@ class Retriever:
             conn.close()
 
     # --- 内部 ---
+    def _merge_profile(
+        self,
+        conn,
+        account: str,
+        scope_type: str,
+        user_id: str,
+        block: str,
+        max_chars: int,
+    ) -> str:
+        """画像块（8.2）：只做私聊；叠加在召回块之外，不占召回额度。
+
+        召回在向量不可用 / 无命中时会提前返回，那时也要把画像带上——
+        画像不依赖 embedding，用户的基本信息本来就该一直在场。
+        """
+        if scope_type != "private":
+            return block
+        scope_key_value = store.scope_key(account, "private", user_id)
+        budget = int(self.settings.profile_max_chars)
+        profile_block = profile_store.render_block(
+            conn, account, scope_key_value, budget
+        )
+        # 8.3：两块合计 ≤ 召回额度 + 画像额度（分隔符也计入），超了按更小预算重排画像
+        room = max_chars + budget - len(block) - 2
+        if profile_block and len(profile_block) > room:
+            profile_block = profile_store.render_block(
+                conn, account, scope_key_value, max(0, room)
+            )
+        if not profile_block:
+            return block
+        return f"{profile_block}\n\n{block}".strip()
+
     def _permission_sql(
         self, account: str, scope_type: str, user_id: str, group_id: str
     ) -> tuple[str, list[object]]:

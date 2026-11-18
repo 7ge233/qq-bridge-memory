@@ -78,3 +78,15 @@ def test_profile_budget_is_configurable(settings, writer, retriever, make_payloa
     result = _recall(tight, PRIVATE)
     assert result.block
     assert "【关于他】" not in result.block or len(result.block) <= 800 + 20
+
+def test_profile_still_injected_when_embedder_down(settings, retriever):
+    """向量模型不可用时召回会提前返回，画像仍要注入（不依赖向量）。"""
+    from retrieval import Retriever
+
+    _seed_profile(settings)
+    blind = Retriever(settings, None)
+    result = _recall(blind, PRIVATE)
+
+    assert result.reason == "model_unavailable"
+    assert result.block.startswith("【关于他】"), result.block[:80]
+    assert len(result.block) <= 800 + settings.profile_max_chars
