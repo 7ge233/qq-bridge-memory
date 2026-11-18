@@ -491,3 +491,22 @@ def test_stable_field_still_protected_from_inferred(settings):
         assert "stated" in report["skipped"][0]["reason"]
     finally:
         conn.close()
+
+def test_watermark_is_last_consumed_turn(settings):
+    """水位 = window.to（最后消费的那一轮），不是服务器时钟。
+
+    否则取数被 turnLimit 截断时，窗口末尾到 now 之间的对话会被永久跳过。
+    """
+    ps.clear_cache()
+    conn = store.open_conn(settings)
+    try:
+        cut = {"from": "2026-11-16T04:00:00+08:00", "to": "2026-11-16T12:24:22+08:00"}
+        ps.upsert(conn, ACCOUNT, SCOPE, [
+            item("user.identity", "在做一个QQ机器人项目，天天在调接口", basis="inferred"),
+        ], "model", window=cut, day_cut_hour=5)
+        at = ps.get_state(conn, ACCOUNT, SCOPE, ps.KEY_LAST_AT)
+        day = ps.get_state(conn, ACCOUNT, SCOPE, ps.KEY_LAST_DAY)
+        assert at == "2026-11-16T12:24:22+08:00", at
+        assert day == "2026-11-16", day
+    finally:
+        conn.close()

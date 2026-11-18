@@ -590,8 +590,12 @@ def _advance_watermark(
     if written <= 0 and not noop_only:
         return None, False
 
-    covered = _logical_day_of(window[1] if window else stamp, cut_hour)
-    set_state(conn, account, scope_key, KEY_LAST_AT, stamp)
+    # 水位必须是「最后一条被消费的对话时间」，不能是服务器时钟：
+    # 取数被 turnLimit 截断时 window[1] 早于 stamp，用 stamp 会把中间那几天
+    # 永久跳过 —— 下次的窗口直接从这个假水位开始。
+    anchor = window[1] if window else stamp
+    covered = _logical_day_of(anchor, cut_hour)
+    set_state(conn, account, scope_key, KEY_LAST_AT, anchor)
     if covered:
         set_state(conn, account, scope_key, KEY_LAST_DAY, covered)
     try:
