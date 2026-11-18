@@ -84,3 +84,14 @@ def test_invalid_scope(tmp_path, monkeypatch):
         no_token = client.get("/v1/turns", params={"account": ACCOUNT, "scope": SCOPE})
     assert bad.status_code == 200 and bad.json()["ok"] is False
     assert no_token.status_code == 401
+
+def test_utc_bounds_are_normalized(tmp_path, monkeypatch):
+    """调用方传 Z（UTC），库里是 +08:00 —— 不能按字符串比大小。"""
+    client = _client(tmp_path, monkeypatch)
+    with client:
+        # 11-17T20:00+08:00 = 11-17T12:00Z，落在 [11-17T11:00Z, 11-17T13:00Z) 内
+        hit = _get(client, **{"from": "2026-11-17T11:00:00.000Z", "to": "2026-11-17T13:00:00.000Z"}).json()
+        miss = _get(client, **{"from": "2026-11-17T13:00:00.000Z", "to": "2026-11-17T15:00:00.000Z"}).json()
+    assert hit["count"] == 1, hit["turns"]
+    assert hit["turns"][0]["content"] == "以后叫我小七吧"
+    assert miss["count"] == 0, miss["turns"]

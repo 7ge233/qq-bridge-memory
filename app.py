@@ -620,11 +620,15 @@ def v1_turns(
         "WHERE account = ? AND scope_key = ? AND scope_type = ?"
     )
     params: list[object] = [account, scope_key_value, scope_type]
+    # 必须用 datetime() 归一化再比：库里是 '+08:00' 结尾的本地串，
+    # 调用方（bridge）传的是 toISOString() 的 'Z' 串。直接按 TEXT 比大小，
+    # "2026-11-18T12:30+08:00" > "2026-11-18T04:30Z" 成立 —— 最近 8 小时的
+    # 对话会被静默丢掉，而且窗口整体错位 8 小时。
     if from_time:
-        sql += " AND created_at >= ?"
+        sql += " AND datetime(created_at) >= datetime(?)"
         params.append(from_time)
     if to_time:
-        sql += " AND created_at < ?"
+        sql += " AND datetime(created_at) < datetime(?)"
         params.append(to_time)
     # 取窗口内**最新**的 take 条（倒序取，再翻回正序）：
     # 首次补跑可能覆盖 7 天、几千轮，按正序截断会只拿到最旧的一段。
