@@ -157,7 +157,7 @@ def test_unknown_and_length(conn):
         [
             item("user.nope", body(20)),
             item("user.identity", body(10)),   # 下限 15
-            item("user.identity", body(50)),   # 上限 40
+            item("user.identity", body(130)),  # 写入上限 120
             item("user.style", ""),
         ],
         "model",
@@ -431,3 +431,63 @@ def test_upsert_without_row_factory(tmp_path):
         conn.close()
     assert first["written"] == 1
     assert second["written"] == 1
+
+def test_long_content_is_saved_but_clipped_for_render(settings):
+    """写入只挡跑飞（>120），显示按 4.4 预算截断 —— 46 字不能再被整条丢掉。"""
+    ps.clear_cache()
+    conn = store.open_conn(settings)
+    try:
+        long_body = "正在开发并反复调试一个对话项目的开发者，靠对话跑测试来验证效果"  # 33 字
+        report = ps.upsert(conn, ACCOUNT, SCOPE, [
+            item("user.identity", long_body, basis="inferred"),
+        ], "model", window=WINDOW, day_cut_hour=5)
+        assert report["written"] == 1, report
+
+        clip = ps._clip_for_render("一" * 60, 40)
+        assert len(clip) <= 41 and clip.endswith("…")
+        styled = ps._clip_for_render("先做接口，再做脚本，最后补文档，剩下的明天再说", 20)
+        assert styled.endswith("…"), styled
+        assert styled[:-1][-1] in "。，；、！？", styled  # 切在句读之后
+    finally:
+        conn.close()
+
+
+def test_volatile_field_overrides_stated(settings):
+    """user.current 是状态：现存 stated 也要被新值覆盖，旧行走 supersede 链。"""
+    ps.clear_cache()
+    conn = store.open_conn(settings)
+    try:
+        first = ps.upsert(conn, ACCOUNT, SCOPE, [
+            item("user.current", "正在给机器人加画像功能，天天在调提示词", basis="stated"),
+        ], "model", window=WINDOW, day_cut_hour=5)
+        assert first["written"] == 1, first
+        second = ps.upsert(conn, ACCOUNT, SCOPE, [
+            item("user.current", "画像跑通了，这两天在调按日回放的脚本", basis="inferred"),
+        ], "model", window=WINDOW, day_cut_hour=5)
+        assert second["written"] == 1, second
+        rows = conn.execute(
+            "SELECT content, is_active FROM memories WHERE category='profile' AND fact_key='user.current'",
+        ).fetchall()
+        active = [r[0] for r in rows if r[1] == 1]
+        assert active == ["画像跑通了，这两天在调按日回放的脚本"], rows
+    finally:
+        conn.close()
+
+
+def test_stable_field_still_protected_from_inferred(settings):
+    """稳定事实照旧：stated 的身份不能被推断覆盖。"""
+    ps.clear_cache()
+    conn = store.open_conn(settings)
+    try:
+        seed_turns(conn, ["我在一家做企业服务的公司负责接口，就是个后端"])
+        ps.upsert(conn, ACCOUNT, SCOPE, [
+            item("user.identity", "后端工程师，在一家做企业服务的公司负责接口", basis="stated",
+                 evidence="一家做企业服务的公司负责接口"),
+        ], "model", window=WINDOW, day_cut_hour=5)
+        report = ps.upsert(conn, ACCOUNT, SCOPE, [
+            item("user.identity", "可能是个前端，看他聊界面的样子像", basis="inferred"),
+        ], "model", window=WINDOW, day_cut_hour=5)
+        assert report["written"] == 0, report
+        assert "stated" in report["skipped"][0]["reason"]
+    finally:
+        conn.close()

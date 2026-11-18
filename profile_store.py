@@ -75,28 +75,35 @@ class FieldSpec:
     label: str          # 渲染用的中文标签
     permission: str     # locked / user_only / editable
     min_chars: int
-    max_chars: int
+    max_chars: int      # 写入端只挡「跑飞」；预算归渲染端管（见 render_max）
     section: str        # user → 【关于他】；self → 【关于我】
+    render_max: int = 0   # 注入时单字段显示上限（4.4 表的 40/60），超出截断加「…」
+    volatile: bool = False  # 一段时间内成立的状态字段：渲染带时效，且不受「推断不覆盖陈述」约束
 
 
 # 顺序 = 4.4 表顺序：渲染按它排，便于 diff
 FIELD_SPECS: tuple[FieldSpec, ...] = (
     # —— 用户画像（8）——
-    FieldSpec("user.name", "称呼", PERMISSION_EDITABLE, 2, 12, "user"),
-    FieldSpec("user.identity", "身份", PERMISSION_EDITABLE, 15, 40, "user"),
-    FieldSpec("user.schedule", "作息", PERMISSION_EDITABLE, 15, 40, "user"),
-    FieldSpec("user.topics", "常聊", PERMISSION_EDITABLE, 15, 60, "user"),
-    FieldSpec("user.style", "说话风格", PERMISSION_EDITABLE, 15, 40, "user"),
-    FieldSpec("user.boundaries", "雷区", PERMISSION_EDITABLE, 15, 60, "user"),
-    FieldSpec("user.current", "近况", PERMISSION_EDITABLE, 15, 60, "user"),
-    FieldSpec("user.relationship", "相处方式", PERMISSION_EDITABLE, 15, 40, "user"),
+    # 写入上限统一 120：只用来挡「模型吐了一整篇文章」。40/60 是显示预算，
+    # 归 render_max，由渲染端截断 —— 写入端按它拒收等于白丢一次更新。
+    # user.name 例外：2–12 是语义要求（称呼本来就短），不是预算。
+    FieldSpec("user.name", "称呼", PERMISSION_EDITABLE, 2, 12, "user", 12),
+    FieldSpec("user.identity", "身份", PERMISSION_EDITABLE, 15, 120, "user", 40),
+    FieldSpec("user.schedule", "作息", PERMISSION_EDITABLE, 15, 120, "user", 40),
+    FieldSpec("user.topics", "常聊", PERMISSION_EDITABLE, 15, 120, "user", 60),
+    FieldSpec("user.style", "说话风格", PERMISSION_EDITABLE, 15, 120, "user", 40),
+    FieldSpec("user.boundaries", "雷区", PERMISSION_EDITABLE, 15, 120, "user", 60),
+    # volatile：近况天然天天变。规则 5（推断不覆盖陈述）保护的是稳定事实，
+    # 对它 100% 误伤 —— 用户说「我在做 X」本身就是 stated，之后再也改不了。
+    FieldSpec("user.current", "近况", PERMISSION_EDITABLE, 15, 120, "user", 60, True),
+    FieldSpec("user.relationship", "相处方式", PERMISSION_EDITABLE, 15, 120, "user", 40),
     # —— 机器人自我画像（6），前两个是常量，不落库不注入 ——
     FieldSpec("self.name", "自我称呼", PERMISSION_LOCKED, 0, 0, "self"),
     FieldSpec("self.traits", "性格底色", PERMISSION_LOCKED, 0, 0, "self"),
-    FieldSpec("self.speech", "说话习惯", PERMISSION_EDITABLE, 15, 40, "self"),
-    FieldSpec("self.interests", "兴趣", PERMISSION_EDITABLE, 15, 60, "self"),
-    FieldSpec("self.observations", "对用户的观察", PERMISSION_EDITABLE, 15, 60, "self"),
-    FieldSpec("self.growth", "相处中的变化", PERMISSION_EDITABLE, 15, 60, "self"),
+    FieldSpec("self.speech", "说话习惯", PERMISSION_EDITABLE, 15, 120, "self", 40),
+    FieldSpec("self.interests", "兴趣", PERMISSION_EDITABLE, 15, 120, "self", 60),
+    FieldSpec("self.observations", "对用户的观察", PERMISSION_EDITABLE, 15, 120, "self", 60),
+    FieldSpec("self.growth", "相处中的变化", PERMISSION_EDITABLE, 15, 120, "self", 60),
 )
 
 FIELD_SPECS_BY_KEY: dict[str, FieldSpec] = {spec.fact_key: spec for spec in FIELD_SPECS}
@@ -365,7 +372,14 @@ def _validate(
     current = existing.get(fact_key)
 
     # 规则 5：推断不覆盖陈述
-    if basis == BASIS_INFERRED and current and current.get("basis") == BASIS_STATED:
+    # 规则 5 保护的是「一直成立」的事实；volatile 字段（近况）天然天天变，
+    # 用户说「我在做 X」本身就是 stated，锁死它就再也更新不了。
+    if (
+        basis == BASIS_INFERRED
+        and not spec.volatile
+        and current
+        and current.get("basis") == BASIS_STATED
+    ):
         _skip(skipped, fact_key, "inferred_over_stated", "现存是 stated，推断不能覆盖")
         return None
 
@@ -656,12 +670,49 @@ def _truncate(sections: list[list], max_chars: int) -> str:
     return _compose(sections)
 
 
+# 8. 渲染预算：单字段按 4.4 表的显示字数截断，优先切在最后一个句读之后
+CLIP_STOP_CHARS = "。，；、！？"
+VOLATILE_TTL_DAYS = 7  # 4.4「7 天未提及则淡化」
+
+
+def _clip_for_render(text: str, cap: int) -> str:
+    """按显示预算截断单字段：能切在句读之后就切，切不了才硬切，末尾加「…」。"""
+    body = _s(text).strip()
+    if cap <= 0 or len(body) <= cap:
+        return body
+    head = body[:cap]
+    cut = -1
+    for mark in CLIP_STOP_CHARS:
+        pos = head.rfind(mark)
+        if pos > cut:
+            cut = pos
+    # 句读太靠前（不到一半）就别切了，否则只剩半个词
+    if cut >= cap // 2:
+        return head[: cut + 1] + "…"
+    return head[: max(1, cap - 1)] + "…"
+
+
+def _is_stale(updated_at: object, now_ts: float) -> bool:
+    try:
+        ts = parse_iso(_s(updated_at)).timestamp()
+    except Exception:  # noqa: BLE001 - 时间解析失败就当新鲜，别把画像整条吞掉
+        return False
+    return (now_ts - ts) > VOLATILE_TTL_DAYS * 86400
+
+
 def _render_uncached(conn, account: str, scope_key: str, max_chars: int) -> str:
-    fields = {
-        item["fact_key"]: item["content"]
-        for item in load(conn, account, scope_key)
-        if item["content"]
-    }
+    now_ts = time.time()
+    fields: dict[str, str] = {}
+    for item in load(conn, account, scope_key):
+        content = _s(item.get("content")).strip()
+        if not content:
+            continue
+        spec = FIELD_SPECS_BY_KEY.get(_s(item.get("fact_key")))
+        if spec is None:
+            continue
+        if spec.volatile and _is_stale(item.get("updated_at"), now_ts):
+            continue  # 过期的「近况」宁可不注入
+        fields[spec.fact_key] = _clip_for_render(content, spec.render_max)
     if not fields:
         return ""
     return _truncate(_sections(fields), max_chars)
