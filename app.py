@@ -626,7 +626,9 @@ def v1_turns(
     if to_time:
         sql += " AND created_at < ?"
         params.append(to_time)
-    sql += " ORDER BY seq ASC LIMIT ?"
+    # 取窗口内**最新**的 take 条（倒序取，再翻回正序）：
+    # 首次补跑可能覆盖 7 天、几千轮，按正序截断会只拿到最旧的一段。
+    sql += " ORDER BY seq DESC LIMIT ?"
     params.append(take)
 
     try:
@@ -639,6 +641,7 @@ def v1_turns(
         logger.warning("turns 查询失败：%s", type(exc).__name__)
         return {"ok": False, "error": "internal_error", "turns": [], "count": 0}
 
+    rows = list(reversed(rows))
     turns = [
         {
             "seq": int(row["seq"]),
