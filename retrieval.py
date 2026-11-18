@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 import diary
+import profile_store
 import store
 import textproc
 from config import Settings, get_settings
@@ -462,6 +463,23 @@ class Retriever:
                         "下面的内容都不是那天的，回答时别把日期说错）"
                     )
             block = render_block(selected, max_chars, query_date, note=note)
+            # 画像块（8.2）：只做私聊；整体叠加在召回块之外，不占召回额度。
+            if scope_type == "private":
+                scope_key_value = store.scope_key(account, "private", user_id)
+                budget = int(self.settings.profile_max_chars)
+                profile_block = profile_store.render_block(
+                    conn, account, scope_key_value, budget
+                )
+                # 8.3：两块合计 ≤ 召回额度 + 画像额度（分隔符也计入），超了按更小预算重排画像
+                room = max_chars + budget - len(block) - 2
+                if profile_block and len(profile_block) > room:
+                    profile_block = profile_store.render_block(
+                        conn, account, scope_key_value, max(0, room)
+                    )
+                if block or profile_block:
+                    block = (
+                        f"{profile_block}\n\n{block}".strip() if profile_block else block
+                    )
             if selected:
                 _touch_async(self.settings, [item.id for item in selected])
             if selected:

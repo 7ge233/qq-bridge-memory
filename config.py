@@ -6,6 +6,7 @@
   QQ_MEMORY_MODEL_DIR 模型缓存目录（默认 <项目>/models，首次运行下载约 200MB；可改到别的盘）
   QQ_MEMORY_SIM_GATE  向量余弦硬门槛（默认 0.55，按 8.3 标定后修改）
   QQ_MEMORY_WRITE_SYNC=1 时 /v1/write 同步落库（默认 0=入队异步，测试用 1）
+  QQ_MEMORY_PROFILE_CHARS 画像注入块上限（默认 400；叠加在召回块之外，合计 1200）
 """
 
 from __future__ import annotations
@@ -86,6 +87,8 @@ class Settings:
     sim_gate: float = 0.55
     recall_limit: int = 6
     recall_max_chars: int = 800
+    # 画像注入块：整体叠加在召回块之外，不占召回额度（指令书 8.3）
+    profile_max_chars: int = 400
     candidate_pool: int = 200
     # 分层抽样：把 id 区间切成 pool_strata 段，每段取最新一条进候选池。
     # 否则老记忆只有被 FTS 命中才可能进池（v2.5.1）。
@@ -162,6 +165,7 @@ class Settings:
             sim_gate=_env_float("QQ_MEMORY_SIM_GATE", 0.55),
             recall_limit=_env_int("QQ_MEMORY_RECALL_LIMIT", 6),
             recall_max_chars=_env_int("QQ_MEMORY_RECALL_CHARS", 800),
+    profile_max_chars=_env_int("QQ_MEMORY_PROFILE_CHARS", 400),
             candidate_pool=_env_int("QQ_MEMORY_CANDIDATE_POOL", 200),
             pool_strata=_env_int("QQ_MEMORY_POOL_STRATA", 100),
             weight_sim=_env_float("QQ_MEMORY_W_SIM", 0.7),

@@ -675,6 +675,8 @@ def render_block(
 
     try:
         block = _render_uncached(conn, acc, key, budget)
+    except ValueError:
+        return ""  # 群聊/异常 scope 本来就没有画像，属于正常情况，不打日志
     except Exception:  # noqa: BLE001 - 画像永远是可选增强，不能把召回带崩
         logger.warning("画像渲染失败，本次跳过", exc_info=True)
         return ""
