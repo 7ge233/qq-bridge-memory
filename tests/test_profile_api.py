@@ -69,7 +69,13 @@ def test_empty_scope_returns_empty_block(tmp_path, monkeypatch):
     with client:
         resp = _get(client)
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "items": [], "block": "", "blockChars": 0}
+    assert resp.json() == {
+        "ok": True,
+        "state": {"last_profile_at": "", "last_profile_day": "", "profile_runs": "0"},
+        "items": [],
+        "block": "",
+        "blockChars": 0,
+    }
 
 
 def test_write_then_read(tmp_path, monkeypatch):

@@ -23,7 +23,7 @@ import time
 import traceback
 from contextlib import asynccontextmanager
 
-from fastapi import APIRouter, Body, Depends, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import ValidationError
 
@@ -593,6 +593,69 @@ def v1_diary_read(
     return {"ok": True, "date": label.isoformat(), "items": rows}
 
 # ---------------------------------------------------------------------------
+# /v1/turns —— 按区间取对话原文（给 bridge 的画像生成/会话总结用）
+# ---------------------------------------------------------------------------
+
+@api.get("/turns")
+def v1_turns(
+    request: Request,
+    account: str = "",
+    scope: str = "",
+    from_time: str = Query("", alias="from"),
+    to_time: str = Query("", alias="to"),
+    limit: int = 200,
+) -> dict:
+    """左闭右开 [from, to)；时间直接按 TEXT 比较（库里统一 +08:00 ISO 串）。"""
+    scope_type, _, sid = str(scope or "").partition(":")
+    if not account or scope_type not in ("private", "group") or not sid:
+        return {"ok": False, "error": "invalid_request", "turns": [], "count": 0}
+    settings: Settings = request.app.state.settings
+    user_id = sid if scope_type == "private" else ""
+    group_id = sid if scope_type == "group" else ""
+    scope_key_value = store.scope_key(account, scope_type, user_id, group_id)
+    take = max(1, min(1000, int(limit or 200)))
+
+    sql = (
+        "SELECT seq, role, speaker_name, content, created_at FROM conversation_turns "
+        "WHERE account = ? AND scope_key = ? AND scope_type = ?"
+    )
+    params: list[object] = [account, scope_key_value, scope_type]
+    if from_time:
+        sql += " AND created_at >= ?"
+        params.append(from_time)
+    if to_time:
+        sql += " AND created_at < ?"
+        params.append(to_time)
+    sql += " ORDER BY seq ASC LIMIT ?"
+    params.append(take)
+
+    try:
+        conn = store.open_conn(settings)
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        logger.warning("turns 查询失败：%s", type(exc).__name__)
+        return {"ok": False, "error": "internal_error", "turns": [], "count": 0}
+
+    turns = [
+        {
+            "seq": int(row["seq"]),
+            "role": _s(row["role"]),
+            "speaker_name": _s(row["speaker_name"]),
+            "content": _s(row["content"]),
+            "created_at": _s(row["created_at"]),
+        }
+        for row in rows
+    ]
+    logging_setup.log_event(
+        "turns", account_fp=_account_fp(account), scope=scope_type, count=len(turns)
+    )
+    return {"ok": True, "turns": turns, "count": len(turns)}
+
+
+# ---------------------------------------------------------------------------
 # /v1/profile —— 画像读写（5.1 / 5.2）
 # ---------------------------------------------------------------------------
 
@@ -621,17 +684,30 @@ def v1_profile_read(
     try:
         items = profile_store.load(conn, account, scope_key)
         block = profile_store.render_block(conn, account, scope_key, budget)
+        # 水位（4.3）：bridge 的补跑要从这里知道上次生成到哪
+        state = {
+            "last_profile_at": profile_store.get_state(
+                conn, account, scope_key, profile_store.KEY_LAST_AT, ""
+            ),
+            "last_profile_day": profile_store.get_state(
+                conn, account, scope_key, profile_store.KEY_LAST_DAY, ""
+            ),
+            "profile_runs": profile_store.get_state(
+                conn, account, scope_key, profile_store.KEY_RUNS, "0"
+            ),
+        }
     except ValueError:
         return {
             "ok": False,
             "error": "invalid_request",
+            "state": {},
             "items": [],
             "block": "",
             "blockChars": 0,
         }
     except Exception as exc:  # noqa: BLE001 - 读画像失败不能让控制台/桥接报错
         logger.warning("profile 读取失败：%s", type(exc).__name__)
-        return {"ok": False, "error": "internal_error", "items": [], "block": "", "blockChars": 0}
+        return {"ok": False, "error": "internal_error", "state": {}, "items": [], "block": "", "blockChars": 0}
     finally:
         conn.close()
     logging_setup.log_event(
@@ -642,6 +718,7 @@ def v1_profile_read(
     )
     return {
         "ok": True,
+        "state": state,
         "items": [
             {
                 "fact_key": one["fact_key"],
